@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Index Currency Tracker</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f3f4f6; color: #1f2937; }
+        header { background: #1e3a5f; color: white; padding: 1rem 2rem; display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }
+        header h1 { font-size: 1.3rem; margin-right: auto; }
+        .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+        .controls label { font-size: 0.85rem; opacity: 0.85; }
+        .controls select, .controls input, .controls button {
+            padding: 0.4rem 0.6rem; border: 1px solid #475569; border-radius: 4px;
+            font-size: 0.85rem; background: #fff; color: #1f2937;
+        }
+        .controls button { background: #3b82f6; color: white; border: none; cursor: pointer; font-weight: 600; }
+        .controls button:hover { background: #2563eb; }
+        #status-bar { background: #fef3c7; color: #92400e; padding: 0.5rem 2rem; font-size: 0.85rem; display: none; }
+        #status-bar.error { background: #fee2e2; color: #991b1b; }
+        main { padding: 1.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 1.5rem; }
+
+        .ticker-card {
+            background: white; border-radius: 8px; padding: 1.2rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            position: relative; cursor: grab; transition: box-shadow 0.2s, transform 0.2s, border-color 0.2s;
+            border: 2px solid transparent;
+        }
+        .ticker-card:active { cursor: grabbing; }
+        .ticker-card.dragging { opacity: 0.5; transform: scale(0.97); }
+        .ticker-card.drag-over { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.25), 0 4px 12px rgba(0,0,0,0.15); transform: scale(1.01); }
+
+        .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.8rem; }
+        .card-header h2 { font-size: 1rem; color: #1e3a5f; }
+        .subtitle { font-size: 0.78rem; color: #6b7280; margin-top: 2px; }
+        .remove-btn {
+            background: none; border: none; color: #9ca3af; cursor: pointer; font-size: 1.2rem; line-height: 1; padding: 0 4px;
+        }
+        .remove-btn:hover { color: #ef4444; }
+        .split-btn {
+            background: none; border: none; color: #9ca3af; cursor: pointer; font-size: 0.8rem; padding: 2px 6px; margin-left: 4px;
+            border-radius: 3px;
+        }
+        .split-btn:hover { color: #3b82f6; background: #eff6ff; }
+
+        .ticker-badges { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.6rem; }
+        .ticker-badge {
+            display: inline-flex; align-items: center; gap: 0.3rem;
+            padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; color: white;
+        }
+        .ticker-badge .badge-remove {
+            background: none; border: none; color: rgba(255,255,255,0.7); cursor: pointer;
+            font-size: 0.85rem; line-height: 1; padding: 0; margin-left: 2px;
+        }
+        .ticker-badge .badge-remove:hover { color: white; }
+
+        .current-price { font-size: 1.4rem; font-weight: 700; color: #111827; margin-bottom: 0.6rem; }
+        .prices-row { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 0.6rem; }
+        .prices-row .price-item { font-size: 0.85rem; }
+        .prices-row .price-item .price-label { font-weight: 600; }
+
+        .chart-container { position: relative; height: 240px; margin-bottom: 1rem; }
+        .perf-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+        .perf-table th { text-align: left; padding: 0.4rem 0.6rem; background: #f9fafb; border-bottom: 2px solid #e5e7eb; color: #6b7280; font-weight: 600; }
+        .perf-table td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #f3f4f6; }
+        .perf-table .positive { color: #16a34a; font-weight: 600; }
+        .perf-table .negative { color: #dc2626; font-weight: 600; }
+        .perf-table .na { color: #9ca3af; }
+
+        .loading-overlay {
+            position: absolute; inset: 0; background: rgba(255,255,255,0.85); display: flex;
+            align-items: center; justify-content: center; border-radius: 8px; z-index: 2;
+        }
+        .spinner { width: 28px; height: 28px; border: 3px solid #e5e7eb; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.7s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .card-error { color: #991b1b; font-size: 0.85rem; padding: 1rem; text-align: center; }
+
+        .drag-hint { font-size: 0.72rem; color: #9ca3af; text-align: center; margin-top: 0.6rem; font-style: italic; }
+
+        @media (max-width: 540px) { main { grid-template-columns: 1fr; padding: 0.8rem; } header { padding: 0.8rem; } }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Index Currency Tracker</h1>
+        <div class="controls">
+            <label for="currency-select">Display currency:</label>
+            <select id="currency-select">
+                <option value="USD" selected>USD</option>
+                <option value="EUR">EUR</option>
+                <option value="SEK">SEK</option>
+                <option value="XDR">XDR (SDR)</option>
+            </select>
+            <input id="ticker-input" type="text" placeholder="Add ticker (e.g. AAPL)" style="width:170px">
+            <button id="add-btn">Add</button>
+        </div>
+    </header>
+    <div id="status-bar"></div>
+    <main id="tickers-grid"></main>
+
+    <script>
+    (() => {
+        // ── Configuration ──
+        const CORS_PROXIES = [
+            url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+            url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+        ];
+        const YAHOO_CHART = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+        const DEFAULT_TICKERS = ['VT', 'VTI', 'VXUS', 'VOO', 'WEBN.DE', 'SPYI.DE', '0P00000LST.ST'];
+        const FOREX_PAIRS = {
+            'EURUSD': 'EURUSD=X',
+            'USDSEK': 'USDSEK=X',
+            'GBPUSD': 'GBPUSD=X',
+            'USDJPY': 'USDJPY=X',
+            'USDCNY': 'USDCNY=X',
+        };
+        const XDR_BASKET = { USD: 0.38671, EUR: 0.57813, CNY: 1.0993, JPY: 13.452, GBP: 0.080870 };
+        const CHART_COLORS = ['#2563eb','#0891b2','#7c3aed','#059669','#d97706','#dc2626','#db2777','#4f46e5','#0d9488','#ca8a04'];
+
+        // ── State ──
+        let nextPanelId = 1;
+        const state = {
+            panels: [],       // { id, symbols[] }
+            currency: 'USD',
+            tickerData: {},   // symbol -> { timestamps[], adjClose[], currency, name }
+            forexData: {},    // pairKey -> { timestamps[], rates[] }
+            charts: {},       // panelId -> Chart instance
+        };
+        let dragSourcePanelId = null;
+
+        // ── DOM refs ──
+        const grid = document.getElementById('tickers-grid');
+        const currencySelect = document.getElementById('currency-select');
+        const tickerInput = document.getElementById('ticker-input');
+        const addBtn = document.getElementById('add-btn');
+        const statusBar = document.getElementById('status-bar');
+
+        // ── Utility ──
+        function showStatus(msg, isError = false) {
+            statusBar.textContent = msg;
+            statusBar.className = isError ? 'error' : '';
+            statusBar.style.display = msg ? 'block' : 'none';
+        }
+
+        function closestIndex(timestamps, target) {
+            let lo = 0, hi = timestamps.length - 1;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (timestamps[mid] < target) lo = mid + 1; else hi = mid;
+            }
+            if (lo > 0 && Math.abs(timestamps[lo - 1] - target) < Math.abs(timestamps[lo] - target)) return lo - 1;
+            return lo;
+        }
+
+        function monthsAgo(months) {
+            const d = new Date();
+            d.setMonth(d.getMonth() - months);
+            return d.getTime() / 1000;
+        }
+
+        function formatPrice(value, currency) {
+            if (value == null || isNaN(value)) return 'N/A';
+            const symbols = { USD: '$', EUR: '€', SEK: 'kr ', XDR: 'XDR ' };
+            const decimals = currency === 'SEK' ? 1 : (currency === 'XDR' ? 4 : 2);
+            const prefix = symbols[currency] || currency + ' ';
+            if (currency === 'SEK') return value.toFixed(decimals) + ' kr';
+            return prefix + value.toFixed(decimals);
+        }
+
+        function findPanel(panelId) {
+            return state.panels.find(p => p.id === panelId);
+        }
+
+        function findPanelBySymbol(symbol) {
+            return state.panels.find(p => p.symbols.includes(symbol));
+        }
+
+        function allSymbols() {
+            return state.panels.flatMap(p => p.symbols);
+        }
+
+        // ── Fetching ──
+        async function fetchWithProxy(url) {
+            let lastErr;
+            for (const proxyFn of CORS_PROXIES) {
+                try {
+                    const proxied = proxyFn(url);
+                    const resp = await fetch(proxied, { signal: AbortSignal.timeout(15000) });
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    return await resp.json();
+                } catch (e) { lastErr = e; }
+            }
+            throw lastErr || new Error('All proxies failed');
+        }
+
+        async function fetchYahooChart(symbol) {
+            const url = `${YAHOO_CHART}${encodeURIComponent(symbol)}?range=5y&interval=1d&includeAdjustedClose=true`;
+            const json = await fetchWithProxy(url);
+            const result = json?.chart?.result?.[0];
+            if (!result) throw new Error(`No data for ${symbol}`);
+            const ts = result.timestamp;
+            const adjClose = result.indicators?.adjclose?.[0]?.adjclose || result.indicators?.quote?.[0]?.close;
+            const meta = result.meta || {};
+            const filtered = { timestamps: [], adjClose: [] };
+            for (let i = 0; i < ts.length; i++) {
+                if (adjClose[i] != null && !isNaN(adjClose[i])) {
+                    filtered.timestamps.push(ts[i]);
+                    filtered.adjClose.push(adjClose[i]);
+                }
+            }
+            return {
+                timestamps: filtered.timestamps,
+                adjClose: filtered.adjClose,
+                currency: meta.currency || 'USD',
+                name: meta.shortName || meta.longName || symbol,
+                symbol: meta.symbol || symbol,
+            };
+        }
+
+        // ── Forex ──
+        async function fetchAllForex() {
+            const promises = Object.entries(FOREX_PAIRS).map(async ([key, symbol]) => {
+                try {
+                    const data = await fetchYahooChart(symbol);
+                    state.forexData[key] = { timestamps: data.timestamps, rates: data.adjClose };
+                } catch (e) { console.warn(`Failed to fetch forex ${key}:`, e.message); }
+            });
+            await Promise.all(promises);
+        }
+
+        function getForexRate(pairKey, timestamp) {
+            const fx = state.forexData[pairKey];
+            if (!fx || fx.timestamps.length === 0) return null;
+            return fx.rates[closestIndex(fx.timestamps, timestamp)];
+        }
+
+        function toUSD(price, fromCurrency, timestamp) {
+            if (fromCurrency === 'USD') return price;
+            if (fromCurrency === 'EUR') { const r = getForexRate('EURUSD', timestamp); return r ? price * r : null; }
+            if (fromCurrency === 'SEK') { const r = getForexRate('USDSEK', timestamp); return r ? price / r : null; }
+            if (fromCurrency === 'GBP') { const r = getForexRate('GBPUSD', timestamp); return r ? price * r : null; }
+            if (fromCurrency === 'JPY') { const r = getForexRate('USDJPY', timestamp); return r ? price / r : null; }
+            if (fromCurrency === 'CNY') { const r = getForexRate('USDCNY', timestamp); return r ? price / r : null; }
+            return null;
+        }
+
+        function fromUSD(priceUSD, toCurrency, timestamp) {
+            if (toCurrency === 'USD') return priceUSD;
+            if (toCurrency === 'EUR') { const r = getForexRate('EURUSD', timestamp); return r ? priceUSD / r : null; }
+            if (toCurrency === 'SEK') { const r = getForexRate('USDSEK', timestamp); return r ? priceUSD * r : null; }
+            if (toCurrency === 'XDR') {
+                let xdrInUSD = 0;
+                for (const [cur, weight] of Object.entries(XDR_BASKET)) {
+                    const c = toUSD(weight, cur, timestamp);
+                    if (c == null) return null;
+                    xdrInUSD += c;
+                }
+                return priceUSD / xdrInUSD;
+            }
+            return null;
+        }
+
+        function convertPrice(price, fromCurrency, toCurrency, timestamp) {
+            if (fromCurrency === toCurrency) return price;
+            const usd = toUSD(price, fromCurrency, timestamp);
+            if (usd == null) return null;
+            return fromUSD(usd, toCurrency, timestamp);
+        }
+
+        // ── Performance calculation ──
+        function calcPerformance(data, months, targetCurrency) {
+            const endIdx = data.timestamps.length - 1;
+            if (endIdx < 0) return null;
+            const startTs = monthsAgo(months);
+            if (startTs < data.timestamps[0]) return null;
+            const startIdx = closestIndex(data.timestamps, startTs);
+            const endPrice = convertPrice(data.adjClose[endIdx], data.currency, targetCurrency, data.timestamps[endIdx]);
+            const startPrice = convertPrice(data.adjClose[startIdx], data.currency, targetCurrency, data.timestamps[startIdx]);
+            if (endPrice == null || startPrice == null || startPrice === 0) return null;
+            return ((endPrice - startPrice) / startPrice) * 100;
+        }
+
+        // ── Normalization for multi-ticker charts ──
+        // Returns { symbol: [{x, y}], ... } with normalized values
+        function getNormalizedChartData(symbols, targetCurrency) {
+            const threeYearsAgo = monthsAgo(36);
+            const result = {};
+
+            // Step 1: Build converted price series for each ticker within the 3-year window
+            const series = {}; // symbol -> [{ts, price}]
+            let earliestStart = Infinity;
+            let refSymbol = null;
+
+            for (const sym of symbols) {
+                const data = state.tickerData[sym];
+                if (!data || data.timestamps.length === 0) continue;
+                const pts = [];
+                for (let i = 0; i < data.timestamps.length; i++) {
+                    if (data.timestamps[i] < threeYearsAgo) continue;
+                    const converted = convertPrice(data.adjClose[i], data.currency, targetCurrency, data.timestamps[i]);
+                    if (converted != null) {
+                        pts.push({ ts: data.timestamps[i], price: converted });
+                    }
+                }
+                if (pts.length > 0) {
+                    series[sym] = pts;
+                    if (pts[0].ts < earliestStart) {
+                        earliestStart = pts[0].ts;
+                        refSymbol = sym;
+                    }
+                }
+            }
+
+            if (!refSymbol) return result;
+
+            // Step 2: Normalize the reference ticker to start at 100
+            const refSeries = series[refSymbol];
+            const refBase = refSeries[0].price;
+            if (refBase === 0) return result;
+
+            const refNormalized = refSeries.map(p => ({
+                ts: p.ts,
+                norm: (p.price / refBase) * 100,
+            }));
+
+            result[refSymbol] = refNormalized.map(p => ({ x: p.ts * 1000, y: p.norm }));
+
+            // Step 3: Normalize other tickers
+            for (const sym of Object.keys(series)) {
+                if (sym === refSymbol) continue;
+                const s = series[sym];
+                const symBase = s[0].price;
+                if (symBase === 0) continue;
+
+                // Find the reference ticker's normalized value at this ticker's start date
+                const startTs = s[0].ts;
+                const refIdx = closestIndex(refNormalized.map(p => p.ts), startTs);
+                const refValueAtStart = refNormalized[refIdx].norm;
+
+                result[sym] = s.map(p => ({
+                    x: p.ts * 1000,
+                    y: (p.price / symBase) * refValueAtStart,
+                }));
+            }
+
+            return result;
+        }
+
+        // ── Panel rendering ──
+        function createPanelCard(panel) {
+            const card = document.createElement('div');
+            card.className = 'ticker-card';
+            card.id = `panel-${panel.id}`;
+            card.draggable = true;
+            card.dataset.panelId = panel.id;
+
+            // Drag-and-drop handlers
+            card.addEventListener('dragstart', onDragStart);
+            card.addEventListener('dragend', onDragEnd);
+            card.addEventListener('dragover', onDragOver);
+            card.addEventListener('dragenter', onDragEnter);
+            card.addEventListener('dragleave', onDragLeave);
+            card.addEventListener('drop', onDrop);
+
+            grid.appendChild(card);
+            renderPanelContent(panel);
+        }
+
+        function renderPanelContent(panel) {
+            const card = document.getElementById(`panel-${panel.id}`);
+            if (!card) return;
+            const isMulti = panel.symbols.length > 1;
+            const loadedSymbols = panel.symbols.filter(s => state.tickerData[s]);
+            const pendingSymbols = panel.symbols.filter(s => !state.tickerData[s]);
+
+            // Header
+            let headerHTML;
+            if (isMulti) {
+                const badgesHTML = panel.symbols.map((sym, i) => {
+                    const color = CHART_COLORS[i % CHART_COLORS.length];
+                    const data = state.tickerData[sym];
+                    const label = data ? `${sym}` : `${sym} (loading)`;
+                    return `<span class="ticker-badge" style="background:${color}" title="${data ? data.name : sym}">
+                        ${label}
+                        <button class="badge-remove" data-panel="${panel.id}" data-symbol="${sym}" title="Remove ${sym}">&times;</button>
+                    </span>`;
+                }).join('');
+                headerHTML = `
+                    <div class="card-header">
+                        <div><h2>Comparison</h2><div class="subtitle">Normalized performance (base 100)</div></div>
+                        <button class="remove-btn" data-panel-remove="${panel.id}" title="Remove panel">&times;</button>
+                    </div>
+                    <div class="ticker-badges">${badgesHTML}</div>`;
+            } else {
+                const sym = panel.symbols[0];
+                const data = state.tickerData[sym];
+                headerHTML = `
+                    <div class="card-header">
+                        <div>
+                            <h2>${sym}</h2>
+                            <div class="subtitle">${data ? `${data.name} (native: ${data.currency})` : 'Loading...'}</div>
+                        </div>
+                        <button class="remove-btn" data-panel-remove="${panel.id}" title="Remove">&times;</button>
+                    </div>`;
+            }
+
+            // Price display
+            let priceHTML = '';
+            if (isMulti) {
+                const items = loadedSymbols.map(sym => {
+                    const data = state.tickerData[sym];
+                    const lastIdx = data.timestamps.length - 1;
+                    const converted = convertPrice(data.adjClose[lastIdx], data.currency, state.currency, data.timestamps[lastIdx]);
+                    return `<span class="price-item"><span class="price-label">${sym}:</span> ${converted != null ? formatPrice(converted, state.currency) : 'N/A'}</span>`;
+                }).join('');
+                priceHTML = `<div class="prices-row">${items}</div>`;
+            } else if (loadedSymbols.length === 1) {
+                const data = state.tickerData[loadedSymbols[0]];
+                const lastIdx = data.timestamps.length - 1;
+                const converted = convertPrice(data.adjClose[lastIdx], data.currency, state.currency, data.timestamps[lastIdx]);
+                priceHTML = `<div class="current-price">${converted != null ? formatPrice(converted, state.currency) : 'N/A'}</div>`;
+            }
+
+            // Performance table
+            const periods = [
+                { label: '6 Month', months: 6 },
+                { label: '1 Year', months: 12 },
+                { label: '3 Year', months: 36 },
+                { label: '5 Year', months: 60 },
+            ];
+
+            let tableHTML;
+            if (isMulti) {
+                const thCols = loadedSymbols.map((sym, i) => {
+                    const color = CHART_COLORS[i % CHART_COLORS.length];
+                    return `<th style="color:${color}">${sym}</th>`;
+                }).join('');
+                const rows = periods.map(p => {
+                    const cells = loadedSymbols.map(sym => {
+                        const perf = calcPerformance(state.tickerData[sym], p.months, state.currency);
+                        if (perf == null) return `<td class="na">N/A</td>`;
+                        const cls = perf >= 0 ? 'positive' : 'negative';
+                        const sign = perf >= 0 ? '+' : '';
+                        return `<td class="${cls}">${sign}${perf.toFixed(2)}%</td>`;
+                    }).join('');
+                    return `<tr><td>${p.label}</td>${cells}</tr>`;
+                }).join('');
+                tableHTML = `<table class="perf-table">
+                    <thead><tr><th>Period</th>${thCols}</tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>`;
+            } else if (loadedSymbols.length === 1) {
+                const data = state.tickerData[loadedSymbols[0]];
+                const rows = periods.map(p => {
+                    const perf = calcPerformance(data, p.months, state.currency);
+                    if (perf == null) return `<tr><td>${p.label}</td><td class="na">N/A</td></tr>`;
+                    const cls = perf >= 0 ? 'positive' : 'negative';
+                    const sign = perf >= 0 ? '+' : '';
+                    return `<tr><td>${p.label}</td><td class="${cls}">${sign}${perf.toFixed(2)}%</td></tr>`;
+                }).join('');
+                tableHTML = `<table class="perf-table">
+                    <thead><tr><th>Period</th><th>Performance</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>`;
+            } else {
+                tableHTML = '';
+            }
+
+            const loadingHTML = pendingSymbols.length > 0
+                ? `<div class="loading-overlay"><div class="spinner"></div></div>`
+                : '';
+
+            card.innerHTML = `
+                ${headerHTML}
+                ${priceHTML}
+                <div class="chart-container"><canvas id="chart-panel-${panel.id}"></canvas></div>
+                ${tableHTML}
+                <div class="drag-hint">Drag onto another card to compare</div>
+                ${loadingHTML}`;
+
+            // Bind remove buttons
+            card.querySelector(`[data-panel-remove="${panel.id}"]`)?.addEventListener('click', () => removePanel(panel.id));
+            card.querySelectorAll('.badge-remove').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    removeSymbolFromPanel(parseInt(btn.dataset.panel), btn.dataset.symbol);
+                });
+            });
+
+            // Render chart
+            renderPanelChart(panel);
+        }
+
+        function renderPanelChart(panel) {
+            const canvasId = `chart-panel-${panel.id}`;
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) return;
+
+            // Destroy existing chart
+            if (state.charts[panel.id]) {
+                state.charts[panel.id].destroy();
+                delete state.charts[panel.id];
+            }
+
+            const loadedSymbols = panel.symbols.filter(s => state.tickerData[s]);
+            if (loadedSymbols.length === 0) return;
+
+            const isMulti = panel.symbols.length > 1;
+            const cur = state.currency;
+
+            if (isMulti) {
+                // Normalized multi-ticker chart
+                const normalized = getNormalizedChartData(loadedSymbols, cur);
+                const datasets = loadedSymbols.map((sym, i) => {
+                    const data = normalized[sym] || [];
+                    const color = CHART_COLORS[i % CHART_COLORS.length];
+                    let displayData = data;
+                    if (data.length > 400) {
+                        const step = Math.ceil(data.length / 400);
+                        displayData = data.filter((_, j) => j % step === 0 || j === data.length - 1);
+                    }
+                    return {
+                        label: sym,
+                        data: displayData,
+                        borderColor: color,
+                        backgroundColor: color + '18',
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        pointHitRadius: 6,
+                        fill: false,
+                        tension: 0.1,
+                    };
+                });
+
+                state.charts[panel.id] = new Chart(canvas.getContext('2d'), {
+                    type: 'line',
+                    data: { datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: { mode: 'index', intersect: false },
+                        plugins: {
+                            legend: { display: true, position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
+                            tooltip: {
+                                callbacks: {
+                                    title: items => new Date(items[0].parsed.x).toLocaleDateString(),
+                                    label: item => `${item.dataset.label}: ${item.parsed.y.toFixed(2)}`,
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: { unit: 'month', displayFormats: { month: 'MMM yy' } },
+                                ticks: { maxTicksLimit: 12, font: { size: 10 } },
+                                grid: { display: false },
+                            },
+                            y: {
+                                title: { display: true, text: 'Normalized (base 100)', font: { size: 10 } },
+                                ticks: { font: { size: 10 } },
+                                grid: { color: '#f3f4f6' },
+                            }
+                        }
+                    }
+                });
+            } else {
+                // Single ticker chart (absolute prices)
+                const sym = loadedSymbols[0];
+                const data = state.tickerData[sym];
+                const threeYearsAgo = monthsAgo(36);
+                const chartData = [];
+                for (let i = 0; i < data.timestamps.length; i++) {
+                    if (data.timestamps[i] < threeYearsAgo) continue;
+                    const converted = convertPrice(data.adjClose[i], data.currency, cur, data.timestamps[i]);
+                    if (converted != null) chartData.push({ x: data.timestamps[i] * 1000, y: converted });
+                }
+                let displayData = chartData;
+                if (chartData.length > 400) {
+                    const step = Math.ceil(chartData.length / 400);
+                    displayData = chartData.filter((_, i) => i % step === 0 || i === chartData.length - 1);
+                }
+                const colorIdx = state.panels.indexOf(panel) % CHART_COLORS.length;
+                const color = CHART_COLORS[colorIdx >= 0 ? colorIdx : 0];
+
+                state.charts[panel.id] = new Chart(canvas.getContext('2d'), {
+                    type: 'line',
+                    data: {
+                        datasets: [{
+                            data: displayData,
+                            borderColor: color,
+                            backgroundColor: color + '18',
+                            borderWidth: 1.5,
+                            pointRadius: 0,
+                            pointHitRadius: 6,
+                            fill: true,
+                            tension: 0.1,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: { mode: 'index', intersect: false },
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    title: items => new Date(items[0].parsed.x).toLocaleDateString(),
+                                    label: item => formatPrice(item.parsed.y, cur),
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: { unit: 'month', displayFormats: { month: 'MMM yy' } },
+                                ticks: { maxTicksLimit: 12, font: { size: 10 } },
+                                grid: { display: false },
+                            },
+                            y: {
+                                title: { display: true, text: cur, font: { size: 10 } },
+                                ticks: { font: { size: 10 } },
+                                grid: { color: '#f3f4f6' },
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        function showPanelError(panelId, message) {
+            const card = document.getElementById(`panel-${panelId}`);
+            if (!card) return;
+            const overlay = card.querySelector('.loading-overlay');
+            if (overlay) overlay.innerHTML = `<div class="card-error">${message}</div>`;
+        }
+
+        // ── Drag and drop ──
+        function onDragStart(e) {
+            const card = e.currentTarget;
+            dragSourcePanelId = parseInt(card.dataset.panelId);
+            card.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', dragSourcePanelId);
+        }
+
+        function onDragEnd(e) {
+            e.currentTarget.classList.remove('dragging');
+            dragSourcePanelId = null;
+            document.querySelectorAll('.ticker-card.drag-over').forEach(el => el.classList.remove('drag-over'));
+        }
+
+        function onDragOver(e) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+        }
+
+        function onDragEnter(e) {
+            e.preventDefault();
+            const card = e.currentTarget;
+            const targetId = parseInt(card.dataset.panelId);
+            if (targetId !== dragSourcePanelId) {
+                card.classList.add('drag-over');
+            }
+        }
+
+        function onDragLeave(e) {
+            const card = e.currentTarget;
+            // Only remove if we're leaving the card entirely (not entering a child)
+            if (!card.contains(e.relatedTarget)) {
+                card.classList.remove('drag-over');
+            }
+        }
+
+        function onDrop(e) {
+            e.preventDefault();
+            const targetCard = e.currentTarget;
+            targetCard.classList.remove('drag-over');
+
+            const sourcePanelId = parseInt(e.dataTransfer.getData('text/plain'));
+            const targetPanelId = parseInt(targetCard.dataset.panelId);
+
+            if (sourcePanelId === targetPanelId || isNaN(sourcePanelId) || isNaN(targetPanelId)) return;
+
+            mergePanels(targetPanelId, sourcePanelId);
+        }
+
+        // ── Panel management ──
+        function createPanel(symbols) {
+            const panel = { id: nextPanelId++, symbols: [...symbols] };
+            state.panels.push(panel);
+            return panel;
+        }
+
+        function mergePanels(targetPanelId, sourcePanelId) {
+            const target = findPanel(targetPanelId);
+            const source = findPanel(sourcePanelId);
+            if (!target || !source) return;
+
+            // Move all symbols from source to target (skip duplicates)
+            for (const sym of source.symbols) {
+                if (!target.symbols.includes(sym)) {
+                    target.symbols.push(sym);
+                }
+            }
+
+            // Remove source panel
+            const sourceIdx = state.panels.indexOf(source);
+            if (sourceIdx >= 0) state.panels.splice(sourceIdx, 1);
+            if (state.charts[source.id]) {
+                state.charts[source.id].destroy();
+                delete state.charts[source.id];
+            }
+            const sourceCard = document.getElementById(`panel-${source.id}`);
+            if (sourceCard) sourceCard.remove();
+
+            // Re-render target
+            renderPanelContent(target);
+        }
+
+        function removePanel(panelId) {
+            const panel = findPanel(panelId);
+            if (!panel) return;
+            const idx = state.panels.indexOf(panel);
+            if (idx >= 0) state.panels.splice(idx, 1);
+            if (state.charts[panelId]) {
+                state.charts[panelId].destroy();
+                delete state.charts[panelId];
+            }
+            const card = document.getElementById(`panel-${panelId}`);
+            if (card) card.remove();
+        }
+
+        function removeSymbolFromPanel(panelId, symbol) {
+            const panel = findPanel(panelId);
+            if (!panel) return;
+            const symIdx = panel.symbols.indexOf(symbol);
+            if (symIdx < 0) return;
+
+            if (panel.symbols.length <= 1) {
+                // Last symbol — remove the whole panel
+                removePanel(panelId);
+                return;
+            }
+
+            // Remove symbol from this panel, create a new standalone panel for it
+            panel.symbols.splice(symIdx, 1);
+
+            // Re-render the merged panel
+            renderPanelContent(panel);
+
+            // Create new standalone panel
+            const newPanel = createPanel([symbol]);
+            createPanelCard(newPanel);
+            // Data is already loaded, just re-render
+            if (state.tickerData[symbol]) {
+                renderPanelContent(newPanel);
+            }
+        }
+
+        // ── Ticker lifecycle ──
+        async function loadTicker(symbol) {
+            const panel = createPanel([symbol]);
+            createPanelCard(panel);
+            try {
+                const data = await fetchYahooChart(symbol);
+                state.tickerData[symbol] = data;
+                // Panel may have been merged while loading — find the current panel
+                const currentPanel = findPanelBySymbol(symbol);
+                if (currentPanel) renderPanelContent(currentPanel);
+            } catch (e) {
+                console.error(`Error loading ${symbol}:`, e);
+                const currentPanel = findPanelBySymbol(symbol);
+                if (currentPanel) showPanelError(currentPanel.id, `Failed to load ${symbol}: ${e.message}`);
+            }
+        }
+
+        function addTicker(symbol) {
+            symbol = symbol.trim().toUpperCase();
+            if (!symbol) return;
+            if (allSymbols().includes(symbol)) {
+                showStatus(`${symbol} is already displayed`, true);
+                setTimeout(() => showStatus(''), 3000);
+                return;
+            }
+            loadTicker(symbol);
+            tickerInput.value = '';
+        }
+
+        // ── Currency switch ──
+        function onCurrencyChange() {
+            state.currency = currencySelect.value;
+            for (const panel of state.panels) {
+                if (panel.symbols.some(s => state.tickerData[s])) {
+                    renderPanelContent(panel);
+                }
+            }
+        }
+
+        // ── Event listeners ──
+        currencySelect.addEventListener('change', onCurrencyChange);
+        addBtn.addEventListener('click', () => addTicker(tickerInput.value));
+        tickerInput.addEventListener('keydown', e => { if (e.key === 'Enter') addTicker(tickerInput.value); });
+
+        // ── Init ──
+        async function init() {
+            showStatus('Loading forex rates...');
+            await fetchAllForex();
+            const missing = [];
+            if (!state.forexData['EURUSD']) missing.push('EUR/USD');
+            if (!state.forexData['USDSEK']) missing.push('USD/SEK');
+            if (missing.length) {
+                showStatus(`Warning: Could not load forex data for ${missing.join(', ')}. Some conversions may not work.`, true);
+            } else {
+                showStatus('Loading tickers...');
+            }
+            await Promise.all(DEFAULT_TICKERS.map(symbol => loadTicker(symbol)));
+            showStatus('');
+        }
+
+        init();
+    })();
+    </script>
+</body>
+</html>
