@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Index Currency Tracker</title>
+    <title>Opes Meliores</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
     <style>
@@ -21,12 +22,14 @@
         .controls button:hover { background: #2563eb; }
         #status-bar { background: #fef3c7; color: #92400e; padding: 0.5rem 2rem; font-size: 0.85rem; display: none; }
         #status-bar.error { background: #fee2e2; color: #991b1b; }
-        main { padding: 1.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 1.5rem; }
+        main { padding: 1.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 1.5rem; align-items: start; }
 
         .ticker-card {
             background: white; border-radius: 8px; padding: 1.2rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
             position: relative; cursor: grab; transition: box-shadow 0.2s, transform 0.2s, border-color 0.2s;
             border: 2px solid transparent;
+            resize: both; overflow: hidden;
+            display: flex; flex-direction: column;
         }
         .ticker-card:active { cursor: grabbing; }
         .ticker-card.dragging { opacity: 0.5; transform: scale(0.97); }
@@ -61,10 +64,11 @@
         .prices-row .price-item { font-size: 0.85rem; }
         .prices-row .price-item .price-label { font-weight: 600; }
 
-        .chart-container { position: relative; height: 240px; margin-bottom: 1rem; }
+        .chart-container { position: relative; min-height: 240px; flex: 1 1 240px; margin-bottom: 1rem; }
         .perf-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
         .perf-table th { text-align: left; padding: 0.4rem 0.6rem; background: #f9fafb; border-bottom: 2px solid #e5e7eb; color: #6b7280; font-weight: 600; }
-        .perf-table td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #f3f4f6; }
+        .perf-table td { padding: 0.3rem 0.6rem; border-bottom: 1px solid #f3f4f6; }
+        .perf-table td[rowspan] { border-bottom: 1px solid #e5e7eb; font-weight: 600; }
         .perf-table .positive { color: #16a34a; font-weight: 600; }
         .perf-table .negative { color: #dc2626; font-weight: 600; }
         .perf-table .na { color: #9ca3af; }
@@ -79,12 +83,21 @@
 
         .drag-hint { font-size: 0.72rem; color: #9ca3af; text-align: center; margin-top: 0.6rem; font-style: italic; }
 
+        .range-buttons { display: flex; gap: 0.3rem; margin-bottom: 0.5rem; }
+        .range-btn {
+            padding: 0.2rem 0.55rem; border: 1px solid #d1d5db; border-radius: 999px;
+            background: #f9fafb; color: #374151; font-size: 0.72rem; font-weight: 600;
+            cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s;
+        }
+        .range-btn:hover { background: #e0e7ff; border-color: #93c5fd; }
+        .range-btn.active { background: #3b82f6; color: white; border-color: #3b82f6; }
+
         @media (max-width: 540px) { main { grid-template-columns: 1fr; padding: 0.8rem; } header { padding: 0.8rem; } }
     </style>
 </head>
 <body>
     <header>
-        <h1>Index Currency Tracker</h1>
+        <h1>Opes Meliores</h1>
         <div class="controls">
             <label for="currency-select">Display currency:</label>
             <select id="currency-select">
@@ -95,6 +108,10 @@
             </select>
             <input id="ticker-input" type="text" placeholder="Add ticker (e.g. AAPL)" style="width:170px">
             <button id="add-btn">Add</button>
+            <span style="color:rgba(255,255,255,0.3);margin:0 0.2rem">|</span>
+            <button id="save-ws-btn">Save workspace</button>
+            <input id="ws-code-input" type="text" placeholder="Workspace code" style="width:110px">
+            <button id="load-ws-btn">Load</button>
         </div>
     </header>
     <div id="status-bar"></div>
@@ -259,7 +276,8 @@
             const endIdx = data.timestamps.length - 1;
             if (endIdx < 0) return null;
             const startTs = monthsAgo(months);
-            if (startTs < data.timestamps[0]) return null;
+            const TOLERANCE = 7 * 86400; // 7 days in seconds
+            if (startTs < data.timestamps[0] - TOLERANCE) return null;
             const startIdx = closestIndex(data.timestamps, startTs);
             const endPrice = convertPrice(data.adjClose[endIdx], data.currency, targetCurrency, data.timestamps[endIdx]);
             const startPrice = convertPrice(data.adjClose[startIdx], data.currency, targetCurrency, data.timestamps[startIdx]);
@@ -267,10 +285,48 @@
             return ((endPrice - startPrice) / startPrice) * 100;
         }
 
+        function getDailyReturns(data, months, targetCurrency) {
+            const endIdx = data.timestamps.length - 1;
+            if (endIdx < 1) return null;
+            const startTs = monthsAgo(months);
+            const TOLERANCE = 7 * 86400;
+            if (startTs < data.timestamps[0] - TOLERANCE) return null;
+            const startIdx = closestIndex(data.timestamps, startTs);
+            const returns = [];
+            for (let i = startIdx + 1; i <= endIdx; i++) {
+                const prev = convertPrice(data.adjClose[i - 1], data.currency, targetCurrency, data.timestamps[i - 1]);
+                const curr = convertPrice(data.adjClose[i], data.currency, targetCurrency, data.timestamps[i]);
+                if (prev != null && curr != null && prev !== 0) {
+                    returns.push((curr - prev) / prev);
+                }
+            }
+            return returns.length > 1 ? returns : null;
+        }
+
+        function calcVolatility(data, months, targetCurrency) {
+            const returns = getDailyReturns(data, months, targetCurrency);
+            if (!returns) return null;
+            const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const variance = returns.reduce((sum, r) => sum + (r - mean) ** 2, 0) / (returns.length - 1);
+            return Math.sqrt(variance) * Math.sqrt(252) * 100;
+        }
+
+        function calcSortino(data, months, targetCurrency) {
+            const returns = getDailyReturns(data, months, targetCurrency);
+            if (!returns) return null;
+            const meanDaily = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const annualizedReturn = meanDaily * 252;
+            const downsideSquares = returns.filter(r => r < 0).map(r => r * r);
+            if (downsideSquares.length === 0) return annualizedReturn > 0 ? Infinity : null;
+            const downsideDev = Math.sqrt(downsideSquares.reduce((a, b) => a + b, 0) / returns.length) * Math.sqrt(252);
+            if (downsideDev === 0) return null;
+            return annualizedReturn / downsideDev;
+        }
+
         // ── Normalization for multi-ticker charts ──
         // Returns { symbol: [{x, y}], ... } with normalized values
-        function getNormalizedChartData(symbols, targetCurrency) {
-            const threeYearsAgo = monthsAgo(36);
+        function getNormalizedChartData(symbols, targetCurrency, months = 36) {
+            const threeYearsAgo = monthsAgo(months);
             const result = {};
 
             // Step 1: Build converted price series for each ticker within the 3-year window
@@ -349,6 +405,28 @@
             card.addEventListener('dragleave', onDragLeave);
             card.addEventListener('drop', onDrop);
 
+            if (panel.colSpan > 1) card.style.gridColumn = `span ${panel.colSpan}`;
+
+            const ro = new ResizeObserver(entries => {
+                for (const entry of entries) {
+                    const w = entry.contentRect.width;
+                    // Determine single-column width from the grid's resolved columns
+                    const cols = getComputedStyle(grid).gridTemplateColumns.split(' ');
+                    const colWidth = parseFloat(cols[0]) || 480;
+                    const gap = parseFloat(getComputedStyle(grid).columnGap) || 0;
+                    // Calculate how many columns this card should span
+                    const span = Math.max(1, Math.min(cols.length, Math.ceil((w + gap) / (colWidth + gap))));
+                    if (span !== panel.colSpan) {
+                        panel.colSpan = span;
+                        card.style.gridColumn = span > 1 ? `span ${span}` : '';
+                    }
+                    // Track resize dimensions for workspace save
+                    panel.resizeWidth = card.offsetWidth;
+                    panel.resizeHeight = card.offsetHeight;
+                }
+            });
+            ro.observe(card);
+
             grid.appendChild(card);
             renderPanelContent(panel);
         }
@@ -416,37 +494,47 @@
                 { label: '5 Year', months: 60 },
             ];
 
+            const metrics = [
+                { key: 'perf', label: 'Return', fn: calcPerformance, fmt: v => { const s = v >= 0 ? '+' : ''; return `${s}${v.toFixed(2)}%`; }, cls: v => v >= 0 ? 'positive' : 'negative' },
+                { key: 'vol', label: 'Volatility', fn: calcVolatility, fmt: v => `${v.toFixed(2)}%`, cls: () => '' },
+                { key: 'sortino', label: 'Sortino', fn: calcSortino, fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
+            ];
+
             let tableHTML;
             if (isMulti) {
                 const thCols = loadedSymbols.map((sym, i) => {
                     const color = CHART_COLORS[i % CHART_COLORS.length];
                     return `<th style="color:${color}">${sym}</th>`;
                 }).join('');
+                const rows = [];
+                for (const p of periods) {
+                    for (const m of metrics) {
+                        const cells = loadedSymbols.map(sym => {
+                            const val = m.fn(state.tickerData[sym], p.months, state.currency);
+                            if (val == null) return `<td class="na">N/A</td>`;
+                            return `<td class="${m.cls(val)}">${m.fmt(val)}</td>`;
+                        }).join('');
+                        const label = m === metrics[0] ? `<td rowspan="${metrics.length}" style="vertical-align:middle">${p.label}</td>` : '';
+                        rows.push(`<tr>${label}<td style="color:#6b7280;font-size:0.75rem">${m.label}</td>${cells}</tr>`);
+                    }
+                }
+                tableHTML = `<table class="perf-table">
+                    <thead><tr><th>Period</th><th></th>${thCols}</tr></thead>
+                    <tbody>${rows.join('')}</tbody>
+                </table>`;
+            } else if (loadedSymbols.length === 1) {
+                const data = state.tickerData[loadedSymbols[0]];
+                const thCols = metrics.map(m => `<th>${m.label}</th>`).join('');
                 const rows = periods.map(p => {
-                    const cells = loadedSymbols.map(sym => {
-                        const perf = calcPerformance(state.tickerData[sym], p.months, state.currency);
-                        if (perf == null) return `<td class="na">N/A</td>`;
-                        const cls = perf >= 0 ? 'positive' : 'negative';
-                        const sign = perf >= 0 ? '+' : '';
-                        return `<td class="${cls}">${sign}${perf.toFixed(2)}%</td>`;
+                    const cells = metrics.map(m => {
+                        const val = m.fn(data, p.months, state.currency);
+                        if (val == null) return `<td class="na">N/A</td>`;
+                        return `<td class="${m.cls(val)}">${m.fmt(val)}</td>`;
                     }).join('');
                     return `<tr><td>${p.label}</td>${cells}</tr>`;
                 }).join('');
                 tableHTML = `<table class="perf-table">
                     <thead><tr><th>Period</th>${thCols}</tr></thead>
-                    <tbody>${rows}</tbody>
-                </table>`;
-            } else if (loadedSymbols.length === 1) {
-                const data = state.tickerData[loadedSymbols[0]];
-                const rows = periods.map(p => {
-                    const perf = calcPerformance(data, p.months, state.currency);
-                    if (perf == null) return `<tr><td>${p.label}</td><td class="na">N/A</td></tr>`;
-                    const cls = perf >= 0 ? 'positive' : 'negative';
-                    const sign = perf >= 0 ? '+' : '';
-                    return `<tr><td>${p.label}</td><td class="${cls}">${sign}${perf.toFixed(2)}%</td></tr>`;
-                }).join('');
-                tableHTML = `<table class="perf-table">
-                    <thead><tr><th>Period</th><th>Performance</th></tr></thead>
                     <tbody>${rows}</tbody>
                 </table>`;
             } else {
@@ -457,9 +545,15 @@
                 ? `<div class="loading-overlay"><div class="spinner"></div></div>`
                 : '';
 
+            const ranges = [{l:'1M',m:1},{l:'3M',m:3},{l:'6M',m:6},{l:'1Y',m:12},{l:'3Y',m:36},{l:'5Y',m:60}];
+            const rangeBtnsHTML = ranges.map(r =>
+                `<button class="range-btn${r.m === panel.chartRange ? ' active' : ''}" data-range="${r.m}">${r.l}</button>`
+            ).join('');
+
             card.innerHTML = `
                 ${headerHTML}
                 ${priceHTML}
+                <div class="range-buttons">${rangeBtnsHTML}</div>
                 <div class="chart-container"><canvas id="chart-panel-${panel.id}"></canvas></div>
                 ${tableHTML}
                 <div class="drag-hint">Drag onto another card to compare</div>
@@ -471,6 +565,15 @@
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     removeSymbolFromPanel(parseInt(btn.dataset.panel), btn.dataset.symbol);
+                });
+            });
+
+            // Range button handlers
+            card.querySelectorAll('.range-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    panel.chartRange = parseInt(btn.dataset.range);
+                    renderPanelContent(panel);
                 });
             });
 
@@ -497,7 +600,7 @@
 
             if (isMulti) {
                 // Normalized multi-ticker chart
-                const normalized = getNormalizedChartData(loadedSymbols, cur);
+                const normalized = getNormalizedChartData(loadedSymbols, cur, panel.chartRange);
                 const datasets = loadedSymbols.map((sym, i) => {
                     const data = normalized[sym] || [];
                     const color = CHART_COLORS[i % CHART_COLORS.length];
@@ -525,7 +628,7 @@
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
-                        interaction: { mode: 'index', intersect: false },
+                        interaction: { mode: 'nearest', axis: 'x', intersect: false },
                         plugins: {
                             legend: { display: true, position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
                             tooltip: {
@@ -554,7 +657,7 @@
                 // Single ticker chart (absolute prices)
                 const sym = loadedSymbols[0];
                 const data = state.tickerData[sym];
-                const threeYearsAgo = monthsAgo(36);
+                const threeYearsAgo = monthsAgo(panel.chartRange);
                 const chartData = [];
                 for (let i = 0; i < data.timestamps.length; i++) {
                     if (data.timestamps[i] < threeYearsAgo) continue;
@@ -673,7 +776,7 @@
 
         // ── Panel management ──
         function createPanel(symbols) {
-            const panel = { id: nextPanelId++, symbols: [...symbols] };
+            const panel = { id: nextPanelId++, symbols: [...symbols], chartRange: 36, colSpan: 1 };
             state.panels.push(panel);
             return panel;
         }
@@ -783,10 +886,142 @@
             }
         }
 
+        // ── Workspace save/load ──
+        const saveWsBtn = document.getElementById('save-ws-btn');
+        const loadWsBtn = document.getElementById('load-ws-btn');
+        const wsCodeInput = document.getElementById('ws-code-input');
+
+        async function saveWorkspace() {
+            const panelCards = grid.querySelectorAll('.ticker-card');
+            const panelsInOrder = [];
+            panelCards.forEach(card => {
+                const pid = parseInt(card.dataset.panelId);
+                const panel = findPanel(pid);
+                if (panel) {
+                    panelsInOrder.push({
+                        symbols: [...panel.symbols],
+                        chartRange: panel.chartRange,
+                        colSpan: panel.colSpan,
+                        resizeWidth: panel.resizeWidth || null,
+                        resizeHeight: panel.resizeHeight || null,
+                    });
+                }
+            });
+            const workspace = { currency: state.currency, panels: panelsInOrder };
+            try {
+                const resp = await fetch('/api/workspace', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(workspace),
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const result = await resp.json();
+                wsCodeInput.value = result.code;
+                showStatus(`Workspace saved! Code: ${result.code}`);
+                setTimeout(() => showStatus(''), 5000);
+            } catch (e) {
+                showStatus('Failed to save workspace: ' + e.message, true);
+                setTimeout(() => showStatus(''), 5000);
+            }
+        }
+
+        async function loadWorkspace() {
+            const code = wsCodeInput.value.trim();
+            if (!code || !/^[A-Za-z0-9]+$/.test(code)) {
+                showStatus('Please enter a valid workspace code', true);
+                setTimeout(() => showStatus(''), 3000);
+                return;
+            }
+            try {
+                const resp = await fetch(`/api/workspace/${encodeURIComponent(code)}`);
+                if (resp.status === 404) { showStatus('Workspace not found', true); setTimeout(() => showStatus(''), 3000); return; }
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const workspace = await resp.json();
+
+                // Clear existing panels
+                for (const panel of [...state.panels]) {
+                    if (state.charts[panel.id]) { state.charts[panel.id].destroy(); delete state.charts[panel.id]; }
+                }
+                state.panels = [];
+                grid.innerHTML = '';
+
+                // Set currency
+                state.currency = workspace.currency || 'USD';
+                currencySelect.value = state.currency;
+
+                // Collect all unique symbols needed
+                const allSyms = new Set();
+                for (const sp of workspace.panels) {
+                    for (const sym of sp.symbols) allSyms.add(sym);
+                }
+
+                // Create panels with saved layout
+                for (const sp of workspace.panels) {
+                    const panel = { id: nextPanelId++, symbols: [...sp.symbols], chartRange: sp.chartRange || 36, colSpan: sp.colSpan || 1 };
+                    state.panels.push(panel);
+                    const card = document.createElement('div');
+                    card.className = 'ticker-card';
+                    card.id = `panel-${panel.id}`;
+                    card.draggable = true;
+                    card.dataset.panelId = panel.id;
+                    card.addEventListener('dragstart', onDragStart);
+                    card.addEventListener('dragend', onDragEnd);
+                    card.addEventListener('dragover', onDragOver);
+                    card.addEventListener('dragenter', onDragEnter);
+                    card.addEventListener('dragleave', onDragLeave);
+                    card.addEventListener('drop', onDrop);
+                    if (panel.colSpan > 1) card.style.gridColumn = `span ${panel.colSpan}`;
+                    if (sp.resizeWidth) card.style.width = sp.resizeWidth + 'px';
+                    if (sp.resizeHeight) card.style.height = sp.resizeHeight + 'px';
+
+                    const ro = new ResizeObserver(entries => {
+                        for (const entry of entries) {
+                            const w = entry.contentRect.width;
+                            const cols = getComputedStyle(grid).gridTemplateColumns.split(' ');
+                            const colWidth = parseFloat(cols[0]) || 480;
+                            const gap = parseFloat(getComputedStyle(grid).columnGap) || 0;
+                            const span = Math.max(1, Math.min(cols.length, Math.ceil((w + gap) / (colWidth + gap))));
+                            if (span !== panel.colSpan) {
+                                panel.colSpan = span;
+                                card.style.gridColumn = span > 1 ? `span ${span}` : '';
+                            }
+                            panel.resizeWidth = card.offsetWidth;
+                            panel.resizeHeight = card.offsetHeight;
+                        }
+                    });
+                    ro.observe(card);
+
+                    card.innerHTML = '<div class="loading-overlay"><div class="spinner"></div></div>';
+                    grid.appendChild(card);
+                }
+
+                // Fetch ticker data for symbols not already loaded
+                showStatus('Loading workspace tickers...');
+                const fetches = [...allSyms].filter(sym => !state.tickerData[sym]).map(async sym => {
+                    try {
+                        const data = await fetchYahooChart(sym);
+                        state.tickerData[sym] = data;
+                    } catch (e) { console.error(`Failed to load ${sym}:`, e); }
+                });
+                await Promise.all(fetches);
+
+                // Render all panels
+                for (const panel of state.panels) {
+                    renderPanelContent(panel);
+                }
+                showStatus('');
+            } catch (e) {
+                showStatus('Failed to load workspace: ' + e.message, true);
+                setTimeout(() => showStatus(''), 5000);
+            }
+        }
+
         // ── Event listeners ──
         currencySelect.addEventListener('change', onCurrencyChange);
         addBtn.addEventListener('click', () => addTicker(tickerInput.value));
         tickerInput.addEventListener('keydown', e => { if (e.key === 'Enter') addTicker(tickerInput.value); });
+        saveWsBtn.addEventListener('click', saveWorkspace);
+        loadWsBtn.addEventListener('click', loadWorkspace);
 
         // ── Init ──
         async function init() {
