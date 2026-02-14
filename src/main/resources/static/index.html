@@ -103,11 +103,7 @@
     <script>
     (() => {
         // ── Configuration ──
-        const CORS_PROXIES = [
-            url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-            url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-        ];
-        const YAHOO_CHART = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+        const API_BASE = '/api/chart/';
         const DEFAULT_TICKERS = ['VT', 'VTI', 'VXUS', 'VOO', 'WEBN.DE', 'SPYI.DE', '0P00000LST.ST'];
         const FOREX_PAIRS = {
             'EURUSD': 'EURUSD=X',
@@ -182,22 +178,11 @@
         }
 
         // ── Fetching ──
-        async function fetchWithProxy(url) {
-            let lastErr;
-            for (const proxyFn of CORS_PROXIES) {
-                try {
-                    const proxied = proxyFn(url);
-                    const resp = await fetch(proxied, { signal: AbortSignal.timeout(15000) });
-                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    return await resp.json();
-                } catch (e) { lastErr = e; }
-            }
-            throw lastErr || new Error('All proxies failed');
-        }
-
         async function fetchYahooChart(symbol) {
-            const url = `${YAHOO_CHART}${encodeURIComponent(symbol)}?range=5y&interval=1d&includeAdjustedClose=true`;
-            const json = await fetchWithProxy(url);
+            const url = `${API_BASE}${encodeURIComponent(symbol)}?range=5y&interval=1d`;
+            const resp = await fetch(url, { signal: AbortSignal.timeout(30000) });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const json = await resp.json();
             const result = json?.chart?.result?.[0];
             if (!result) throw new Error(`No data for ${symbol}`);
             const ts = result.timestamp;

@@ -1,0 +1,10 @@
+services:
+  indexcurrency:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - cache-data:/app/cache
+
+volumes:
+  cache-data:
