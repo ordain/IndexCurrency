@@ -10,6 +10,7 @@ public class ChartData {
     private String currency;
     private String shortName;
     private String exchangeTimezoneName;
+    private String fetchedRange;
     private final List<Long> timestamps = new ArrayList<>();
     private final List<Double> open = new ArrayList<>();
     private final List<Double> high = new ArrayList<>();
@@ -26,6 +27,8 @@ public class ChartData {
     public void setShortName(String shortName) { this.shortName = shortName; }
     public String getExchangeTimezoneName() { return exchangeTimezoneName; }
     public void setExchangeTimezoneName(String tz) { this.exchangeTimezoneName = tz; }
+    public String getFetchedRange() { return fetchedRange; }
+    public void setFetchedRange(String fetchedRange) { this.fetchedRange = fetchedRange; }
 
     public List<Long> getTimestamps() { return timestamps; }
     public List<Double> getOpen() { return open; }

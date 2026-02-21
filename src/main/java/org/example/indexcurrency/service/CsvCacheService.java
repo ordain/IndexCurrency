@@ -49,6 +49,21 @@ public class CsvCacheService {
             ChartData cached = readCsv(csvFile, symbol);
             if (cached != null && !cached.getTimestamps().isEmpty()) {
                 long lastTs = cached.getLastTimestamp();
+
+                // Check if cached data covers the requested range
+                long rangeSeconds = parseRangeToSeconds(range);
+                long cachedFetchedSeconds = parseRangeToSeconds(cached.getFetchedRange());
+                long cachedSpan = lastTs - cached.getTimestamps().get(0);
+                if (cachedSpan < rangeSeconds - 30 * 86400L && cachedFetchedSeconds < rangeSeconds) {
+                    log.info("Cache for {} covers {}d but range {} requires {}d, re-fetching full",
+                            symbol, cachedSpan / 86400, range, rangeSeconds / 86400);
+                    ChartData data = yahooService.fetchChart(symbol, range, interval);
+                    data.setFetchedRange(range);
+                    writeCsv(csvFile, data);
+                    gitService.commitChanges("Update " + symbol);
+                    return data;
+                }
+
                 long fileAge;
                 try {
                     fileAge = Instant.now().getEpochSecond() - Files.getLastModifiedTime(csvFile).toInstant().getEpochSecond();
@@ -77,9 +92,27 @@ public class CsvCacheService {
 
         log.info("No cache for {}, fetching full {}", symbol, range);
         ChartData data = yahooService.fetchChart(symbol, range, interval);
+        data.setFetchedRange(range);
         writeCsv(csvFile, data);
         gitService.commitChanges("Add " + symbol);
         return data;
+    }
+
+    private static long parseRangeToSeconds(String range) {
+        if (range == null || range.isEmpty()) return 5 * 365 * 86400L;
+        char unit = range.charAt(range.length() - 1);
+        int value;
+        try {
+            value = Integer.parseInt(range.substring(0, range.length() - 1));
+        } catch (NumberFormatException e) {
+            return 5 * 365 * 86400L;
+        }
+        return switch (unit) {
+            case 'd' -> value * 86400L;
+            case 'm' -> value * 30L * 86400L;
+            case 'y' -> value * 365L * 86400L;
+            default -> 5 * 365 * 86400L;
+        };
     }
 
     static String sanitizeSymbol(String symbol) {
@@ -103,6 +136,7 @@ public class CsvCacheService {
                 pw.println("# currency=" + data.getCurrency());
                 pw.println("# shortName=" + data.getShortName());
                 pw.println("# exchangeTimezoneName=" + data.getExchangeTimezoneName());
+                if (data.getFetchedRange() != null) pw.println("# fetchedRange=" + data.getFetchedRange());
                 pw.println("date,open,high,low,close,adjclose,volume");
                 for (int i = 0; i < data.getTimestamps().size(); i++) {
                     pw.printf(java.util.Locale.US, "%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d%n",
@@ -131,6 +165,7 @@ public class CsvCacheService {
                 else if (line.startsWith("# currency=")) data.setCurrency(line.substring(11));
                 else if (line.startsWith("# shortName=")) data.setShortName(line.substring(12));
                 else if (line.startsWith("# exchangeTimezoneName=")) data.setExchangeTimezoneName(line.substring(23));
+                else if (line.startsWith("# fetchedRange=")) data.setFetchedRange(line.substring(15));
                 else if (line.startsWith("#") || line.startsWith("date,")) continue;
                 else {
                     String[] parts = line.split(",");
