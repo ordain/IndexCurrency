@@ -28,6 +28,14 @@ tasks.withType(JavaExec).configureEach {
     jvmArgs '--enable-native-access=ALL-UNNAMED'
 }
 
+// Plain JavaExec launcher, bypassing the Spring Boot plugin's resolveMainClassName
+// (which breaks under Gradle 9.2). Run with: gradlew runApp
+tasks.register('runApp', JavaExec) {
+    group = 'application'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.example.indexcurrency.IndexCurrencyApplication'
+}
+
 test {
     useJUnitPlatform()
 }

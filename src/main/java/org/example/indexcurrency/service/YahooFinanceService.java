@@ -8,8 +8,13 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
+import java.util.TreeMap;
 import java.util.concurrent.Semaphore;
 
 @Service
@@ -28,7 +33,8 @@ public class YahooFinanceService {
     }
 
     public ChartData fetchChart(String symbol, String range, String interval) {
-        String url = YAHOO_CHART_URL + symbol + "?range=" + range + "&interval=" + interval + "&includeAdjustedClose=true";
+        String url = YAHOO_CHART_URL + symbol + "?range=" + range + "&interval=" + interval
+                + "&includeAdjustedClose=true&events=div";
         log.info("Fetching full chart from Yahoo: {}", url);
         return parseResponse(symbol, fetchWithThrottle(url));
     }
@@ -36,9 +42,24 @@ public class YahooFinanceService {
     public ChartData fetchIncremental(String symbol, long period1, String interval) {
         long period2 = System.currentTimeMillis() / 1000;
         String url = YAHOO_CHART_URL + symbol + "?period1=" + period1 + "&period2=" + period2
-                + "&interval=" + interval + "&includeAdjustedClose=true";
+                + "&interval=" + interval + "&includeAdjustedClose=true&events=div";
         log.info("Fetching incremental chart from Yahoo: {}", url);
         return parseResponse(symbol, fetchWithThrottle(url));
+    }
+
+    /**
+     * Fetch just the dividend history (ex-date&rarr;amount) for a symbol over Yahoo's full range. Used as
+     * the primary dividend source when adjusting a non-Yahoo (investing.com) price series.
+     */
+    @SuppressWarnings("unchecked")
+    public NavigableMap<LocalDate, Double> fetchDividends(String symbol) {
+        String url = YAHOO_CHART_URL + symbol + "?range=max&interval=1d&events=div";
+        log.info("Fetching dividend history from Yahoo: {}", url);
+        Map<String, Object> json = fetchWithThrottle(url);
+        Map<String, Object> chart = (Map<String, Object>) json.get("chart");
+        List<Map<String, Object>> results = chart != null ? (List<Map<String, Object>>) chart.get("result") : null;
+        if (results == null || results.isEmpty()) return new TreeMap<>();
+        return parseDividends(results.get(0));
     }
 
     @SuppressWarnings("unchecked")
@@ -117,6 +138,30 @@ public class YahooFinanceService {
                     v != null ? v.longValue() : 0L
             );
         }
+        // Yahoo already supplies split-inclusive adjClose; we still record the dividend amounts so the
+        // CSV/API carry them for a future raw-vs-adjusted switch.
+        data.applyDividends(parseDividends(result));
         return data;
+    }
+
+    /** Extract the {@code events.dividends} map from a chart result as ex-date&rarr;amount (UTC dates). */
+    @SuppressWarnings("unchecked")
+    private NavigableMap<LocalDate, Double> parseDividends(Map<String, Object> result) {
+        NavigableMap<LocalDate, Double> out = new TreeMap<>();
+        Map<String, Object> events = (Map<String, Object>) result.get("events");
+        if (events == null) return out;
+        Map<String, Object> dividends = (Map<String, Object>) events.get("dividends");
+        if (dividends == null) return out;
+        for (Object v : dividends.values()) {
+            if (!(v instanceof Map)) continue;
+            Map<String, Object> entry = (Map<String, Object>) v;
+            Object amount = entry.get("amount");
+            Object date = entry.get("date");
+            if (!(amount instanceof Number) || !(date instanceof Number)) continue;
+            LocalDate exDate = Instant.ofEpochSecond(((Number) date).longValue())
+                    .atZone(ZoneOffset.UTC).toLocalDate();
+            out.merge(exDate, ((Number) amount).doubleValue(), Double::sum);
+        }
+        return out;
     }
 }

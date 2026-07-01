@@ -399,15 +399,16 @@
             const seriesMap = {};
             for (const sym of symbols) {
                 const data = state.tickerData[sym];
-                if (!data || data.timestamps.length === 0) continue;
-                if (cutoff < data.timestamps[0] - TOLERANCE) continue;
+                if (!data || data.timestamps.length === 0) return null;
+                if (cutoff < data.timestamps[0] - TOLERANCE) return null;
                 const pts = [];
                 for (let i = 0; i < data.timestamps.length; i++) {
                     if (data.timestamps[i] < cutoff) continue;
                     const converted = convertPrice(data.adjClose[i], data.currency, targetCurrency, data.timestamps[i]);
                     if (converted != null) pts.push({ ts: data.timestamps[i], price: converted });
                 }
-                if (pts.length > 1) seriesMap[sym] = pts;
+                if (pts.length <= 1) return null;
+                seriesMap[sym] = pts;
             }
 
             const syms = Object.keys(seriesMap);
@@ -607,6 +608,169 @@
             return result;
         }
 
+        // ── Portfolio optimizer ──
+        async function optimizePortfolio(panel) {
+            const loadedSymbols = panel.symbols.filter(s => state.tickerData[s]);
+            if (loadedSymbols.length === 0) return;
+
+            const ow = panel.optimizeWeights;
+            const wSum = (ow.perf || 0) + (ow.vol || 0) + (ow.sortino || 0) + (ow.upi || 0);
+            if (wSum === 0) return;
+            const wPerf = (ow.perf || 0) / wSum;
+            const wVol = (ow.vol || 0) / wSum;
+            const wSortino = (ow.sortino || 0) / wSum;
+            const wUpi = (ow.upi || 0) / wSum;
+
+            const bounds = {};
+            for (const sym of loadedSymbols) {
+                const b = panel.optimizeBounds[sym];
+                bounds[sym] = b ? [b[0], b[1]] : [0, 100];
+            }
+            const [totalMin, totalMax] = panel.optimizeTotalBounds;
+
+            // Abort handle — set panel._optimizeAbort = true to stop
+            panel._optimizeAbort = false;
+
+            // Progress UI helpers
+            const card = document.getElementById(`panel-${panel.id}`);
+            const progressBar = card?.querySelector('[data-opt-progress-fill]');
+            const progressLabel = card?.querySelector('[data-opt-progress-label]');
+            function updateProgress(fraction, label) {
+                if (progressBar) progressBar.style.width = (fraction * 100).toFixed(1) + '%';
+                if (progressLabel) progressLabel.textContent = label;
+            }
+
+            // Generate weight combinations recursively
+            function generateCandidates(syms, step) {
+                const results = [];
+                function recurse(idx, current) {
+                    if (idx === syms.length) {
+                        const total = current.reduce((a, b) => a + b, 0);
+                        if (total >= totalMin && total <= totalMax) {
+                            results.push([...current]);
+                        }
+                        return;
+                    }
+                    const sym = syms[idx];
+                    const [lo, hi] = bounds[sym];
+                    for (let w = lo; w <= hi; w += step) {
+                        current.push(w);
+                        recurse(idx + 1, current);
+                        current.pop();
+                    }
+                }
+                recurse(0, [], 0);
+                return results;
+            }
+
+            function evaluateCandidate(weights) {
+                const wObj = {};
+                loadedSymbols.forEach((s, i) => { wObj[s] = weights[i]; });
+                const perf = calcPortfolioPerformance(loadedSymbols, wObj, panel.cashRate, panel.chartRange, state.currency, panel.rebalance);
+                const vol = calcPortfolioVolatility(loadedSymbols, wObj, panel.cashRate, panel.chartRange, state.currency, panel.rebalance);
+                const sortino = calcPortfolioSortino(loadedSymbols, wObj, panel.cashRate, panel.chartRange, state.currency, panel.rebalance);
+                const upi = calcPortfolioUPI(loadedSymbols, wObj, panel.cashRate, panel.chartRange, state.currency, panel.rebalance);
+                if (perf == null || vol == null) return null;
+                return { weights, perf, vol, sortino: sortino ?? 0, upi: upi ?? 0 };
+            }
+
+            // Evaluate candidates in batches, yielding to UI
+            const BATCH_SIZE = 50;
+            async function evaluateCandidatesAsync(candidates, phaseLabel, progressOffset, progressScale) {
+                const results = [];
+                for (let i = 0; i < candidates.length; i++) {
+                    if (panel._optimizeAbort) return null;
+                    const r = evaluateCandidate(candidates[i]);
+                    if (r) results.push(r);
+                    if ((i + 1) % BATCH_SIZE === 0 || i === candidates.length - 1) {
+                        const frac = progressOffset + progressScale * ((i + 1) / candidates.length);
+                        updateProgress(frac, `${phaseLabel}: ${i + 1}/${candidates.length}`);
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                    }
+                }
+                return results;
+            }
+
+            function scoreResults(results) {
+                if (results.length === 0) return [];
+                const fields = ['perf', 'vol', 'sortino', 'upi'];
+                const mins = {}, maxs = {};
+                for (const f of fields) {
+                    mins[f] = Infinity; maxs[f] = -Infinity;
+                    for (const r of results) {
+                        if (r[f] < mins[f]) mins[f] = r[f];
+                        if (r[f] > maxs[f]) maxs[f] = r[f];
+                    }
+                }
+                const norm = (v, f) => {
+                    const range = maxs[f] - mins[f];
+                    return range === 0 ? 0.5 : (v - mins[f]) / range;
+                };
+                for (const r of results) {
+                    r.score = wPerf * norm(r.perf, 'perf')
+                            - wVol * norm(r.vol, 'vol')
+                            + wSortino * norm(r.sortino, 'sortino')
+                            + wUpi * norm(r.upi, 'upi');
+                }
+                results.sort((a, b) => b.score - a.score);
+                return results;
+            }
+
+            // Pass 1: Coarse grid (step 5%)  — 0% to 60% of progress
+            updateProgress(0, 'Generating coarse grid...');
+            await new Promise(resolve => setTimeout(resolve, 0));
+            const coarseCandidates = generateCandidates(loadedSymbols, 5);
+            if (panel._optimizeAbort) return;
+
+            let coarseResults = await evaluateCandidatesAsync(coarseCandidates, 'Coarse', 0, 0.6);
+            if (!coarseResults || panel._optimizeAbort) return;
+            coarseResults = scoreResults(coarseResults);
+            if (coarseResults.length === 0) return;
+
+            const top10 = coarseResults.slice(0, 10);
+
+            // Pass 2: Fine refinement (step 1%, ±5% around each top candidate) — 60% to 100%
+            updateProgress(0.6, 'Generating fine grid...');
+            await new Promise(resolve => setTimeout(resolve, 0));
+            const fineCandidates = [];
+            const seen = new Set();
+            for (const candidate of top10) {
+                function refineRecurse(idx, current) {
+                    if (idx === loadedSymbols.length) {
+                        const total = current.reduce((a, b) => a + b, 0);
+                        if (total >= totalMin && total <= totalMax) {
+                            const key = current.join(',');
+                            if (!seen.has(key)) {
+                                seen.add(key);
+                                fineCandidates.push([...current]);
+                            }
+                        }
+                        return;
+                    }
+                    const sym = loadedSymbols[idx];
+                    const [lo, hi] = bounds[sym];
+                    const base = candidate.weights[idx];
+                    const rLo = Math.max(lo, base - 5);
+                    const rHi = Math.min(hi, base + 5);
+                    for (let w = rLo; w <= rHi; w += 1) {
+                        current.push(w);
+                        refineRecurse(idx + 1, current);
+                        current.pop();
+                    }
+                }
+                refineRecurse(0, []);
+            }
+            if (panel._optimizeAbort) return;
+
+            let fineResults = await evaluateCandidatesAsync(fineCandidates, 'Refining', 0.6, 0.4);
+            if (!fineResults || panel._optimizeAbort) return;
+            fineResults = scoreResults(fineResults);
+
+            updateProgress(1, 'Done');
+            const best = fineResults.length > 0 ? fineResults[0] : coarseResults[0];
+            loadedSymbols.forEach((s, i) => { panel.weights[s] = best.weights[i]; });
+        }
+
         // ── Panel rendering ──
         function createPanelCard(panel) {
             const card = document.createElement('div');
@@ -725,6 +889,52 @@
                     const rebalOpts = ['daily','monthly','quarterly','yearly'].map(v =>
                         `<option value="${v}"${panel.rebalance === v ? ' selected' : ''}>${v.charAt(0).toUpperCase() + v.slice(1)}</option>`
                     ).join('');
+                    let optimizerHTML = '';
+                    if (panel.showOptimizer) {
+                        const ow = panel.optimizeWeights;
+                        const inputStyle = 'width:42px;padding:0.15rem 0.2rem;border:1px solid #d1d5db;border-radius:3px;font-size:0.75rem;text-align:right';
+                        const boundInputs = panel.symbols.map((sym, i) => {
+                            const b = panel.optimizeBounds[sym] || [0, 100];
+                            const color = CHART_COLORS[i % CHART_COLORS.length];
+                            return `<span style="display:inline-flex;align-items:center;gap:1px;margin-right:0.3rem">
+                                <span style="color:${color};font-weight:600;font-size:0.72rem">${sym}</span>
+                                <input type="number" value="${b[0]}" data-opt-bound-min="${sym}" style="${inputStyle};width:36px">-<input type="number" value="${b[1]}" data-opt-bound-max="${sym}" style="${inputStyle};width:36px">%
+                            </span>`;
+                        }).join('');
+                        const tb = panel.optimizeTotalBounds;
+                        optimizerHTML = `<div style="margin-bottom:0.5rem;font-size:0.78rem;border:1px solid #e5e7eb;border-radius:6px;padding:0.4rem 0.6rem;background:#f9fafb">
+                            <a href="#" data-toggle-optimizer style="color:#3b82f6;text-decoration:none;font-weight:600;font-size:0.78rem">&#9660; Optimize</a>
+                            <div style="margin-top:0.3rem;display:flex;flex-wrap:wrap;align-items:center;gap:0.4rem">
+                                <span style="font-weight:600;font-size:0.72rem">Objective:</span>
+                                <span style="display:inline-flex;align-items:center;gap:1px">Return <input type="number" value="${ow.perf}" data-opt-weight="perf" style="${inputStyle}">%</span>
+                                <span style="display:inline-flex;align-items:center;gap:1px">Vol <input type="number" value="${ow.vol}" data-opt-weight="vol" style="${inputStyle}">%</span>
+                                <span style="display:inline-flex;align-items:center;gap:1px">Sortino <input type="number" value="${ow.sortino}" data-opt-weight="sortino" style="${inputStyle}">%</span>
+                                <span style="display:inline-flex;align-items:center;gap:1px">UPI <input type="number" value="${ow.upi}" data-opt-weight="upi" style="${inputStyle}">%</span>
+                            </div>
+                            <div style="margin-top:0.25rem;display:flex;flex-wrap:wrap;align-items:center;gap:0.3rem">
+                                <span style="font-weight:600;font-size:0.72rem">Bounds:</span> ${boundInputs}
+                            </div>
+                            <div style="margin-top:0.25rem;display:flex;flex-wrap:wrap;align-items:center;gap:0.4rem">
+                                <span style="font-weight:600;font-size:0.72rem">Exposure:</span>
+                                <span style="display:inline-flex;align-items:center;gap:1px"><input type="number" value="${tb[0]}" data-opt-total-min style="${inputStyle};width:36px">-<input type="number" value="${tb[1]}" data-opt-total-max style="${inputStyle};width:36px">%</span>
+                                <button data-run-optimize style="padding:0.2rem 0.6rem;background:#3b82f6;color:white;border:none;border-radius:4px;font-size:0.75rem;font-weight:600;cursor:pointer">Optimize</button>
+                            </div>
+                            <div data-opt-progress-container style="display:none;margin-top:0.35rem">
+                                <div style="display:flex;align-items:center;gap:0.5rem">
+                                    <div style="flex:1;height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden">
+                                        <div data-opt-progress-fill style="width:0%;height:100%;background:#3b82f6;border-radius:3px;transition:width 0.15s"></div>
+                                    </div>
+                                    <span data-opt-progress-label style="font-size:0.7rem;color:#6b7280;white-space:nowrap;min-width:100px"></span>
+                                    <button data-stop-optimize style="padding:0.15rem 0.5rem;background:#ef4444;color:white;border:none;border-radius:4px;font-size:0.7rem;font-weight:600;cursor:pointer">Stop</button>
+                                </div>
+                            </div>
+                        </div>`;
+                    } else {
+                        optimizerHTML = `<div style="margin-bottom:0.5rem">
+                            <a href="#" data-toggle-optimizer style="color:#3b82f6;text-decoration:none;font-weight:600;font-size:0.78rem">&#9654; Optimize</a>
+                        </div>`;
+                    }
+
                     weightsHTML = `<div style="margin-bottom:0.5rem;font-size:0.82rem;display:flex;flex-wrap:wrap;align-items:center;gap:0.3rem">
                         ${weightInputs}
                     </div>
@@ -733,7 +943,8 @@
                         <span>Rate: <input type="number" step="0.1" value="${panel.cashRate}" data-cash-rate
                             style="width:60px;padding:0.2rem 0.3rem;border:1px solid #d1d5db;border-radius:4px;font-size:0.8rem;text-align:right">%</span>
                         <span>Rebalance: <select data-rebalance style="padding:0.2rem 0.3rem;border:1px solid #d1d5db;border-radius:4px;font-size:0.8rem">${rebalOpts}</select></span>
-                    </div>`;
+                    </div>
+                    ${optimizerHTML}`;
                 }
 
                 const copyBtnHTML = isPortfolio ? `<button class="split-btn" data-copy-panel="${panel.id}" title="Copy portfolio">Copy</button>` : '';
@@ -802,32 +1013,30 @@
 
             let tableHTML;
             if (isPortfolioComparison) {
-                // Portfolio comparison table: columns are sub-portfolios
+                // Portfolio comparison table: metrics as columns, one row per (period, sub-portfolio)
                 const subs = panel.subPortfolios;
-                const thCols = subs.map((sp, i) => {
-                    const color = CHART_COLORS[i % CHART_COLORS.length];
-                    return `<th style="color:${color}">${sp.name || 'Portfolio'}</th>`;
-                }).join('');
                 const subMetrics = [
-                    { key: 'perf', label: 'Return', fn: (sp, m) => calcPortfolioPerformance(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => { const s = v >= 0 ? '+' : ''; return `${s}${v.toFixed(2)}%`; }, cls: v => v >= 0 ? 'positive' : 'negative' },
-                    { key: 'vol', label: 'Volatility', fn: (sp, m) => calcPortfolioVolatility(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => `${v.toFixed(2)}%`, cls: () => '' },
-                    { key: 'sortino', label: 'Sortino', fn: (sp, m) => calcPortfolioSortino(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
-                    { key: 'upi', label: 'UPI', fn: (sp, m) => calcPortfolioUPI(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
+                    { label: 'Return', fn: (sp, m) => calcPortfolioPerformance(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => { const s = v >= 0 ? '+' : ''; return `${s}${v.toFixed(2)}%`; }, cls: v => v >= 0 ? 'positive' : 'negative' },
+                    { label: 'Vol', fn: (sp, m) => calcPortfolioVolatility(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => `${v.toFixed(2)}%`, cls: () => '' },
+                    { label: 'Sortino', fn: (sp, m) => calcPortfolioSortino(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
+                    { label: 'UPI', fn: (sp, m) => calcPortfolioUPI(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
                 ];
+                const metricCols = subMetrics.map(m => `<th>${m.label}</th>`).join('');
                 const rows = [];
                 for (const p of periods) {
-                    for (const m of subMetrics) {
-                        const cells = subs.map(sp => {
+                    subs.forEach((sp, i) => {
+                        const color = CHART_COLORS[i % CHART_COLORS.length];
+                        const periodCell = i === 0 ? `<td rowspan="${subs.length}" style="vertical-align:middle">${p.label}</td>` : '';
+                        const cells = subMetrics.map(m => {
                             const val = m.fn(sp, p.months);
                             if (val == null) return `<td class="na">N/A</td>`;
                             return `<td class="${m.cls(val)}">${m.fmt(val)}</td>`;
                         }).join('');
-                        const label = m === subMetrics[0] ? `<td rowspan="${subMetrics.length}" style="vertical-align:middle">${p.label}</td>` : '';
-                        rows.push(`<tr>${label}<td style="color:#6b7280;font-size:0.75rem">${m.label}</td>${cells}</tr>`);
-                    }
+                        rows.push(`<tr>${periodCell}<td style="color:${color};font-weight:600;font-size:0.75rem">${sp.name || 'Portfolio'}</td>${cells}</tr>`);
+                    });
                 }
                 tableHTML = `<table class="perf-table">
-                    <thead><tr><th>Period</th><th></th>${thCols}</tr></thead>
+                    <thead><tr><th>Period</th><th></th>${metricCols}</tr></thead>
                     <tbody>${rows.join('')}</tbody>
                 </table>`;
             } else if (isPortfolio) {
@@ -852,34 +1061,32 @@
                     <tbody>${rows}</tbody>
                 </table>`;
             } else if (isMulti) {
-                const thCols = loadedSymbols.map((sym, i) => {
-                    const color = CHART_COLORS[i % CHART_COLORS.length];
-                    return `<th style="color:${color}">${sym}</th>`;
-                }).join('');
-                const metricsWithCorr = loadedSymbols.length > 1
-                    ? [...metrics, { key: 'corr', label: `Corr(${loadedSymbols[0]})`, fn: null, fmt: v => v.toFixed(2), cls: v => '' }]
-                    : metrics;
+                const hasCorr = loadedSymbols.length > 1;
                 const refData = state.tickerData[loadedSymbols[0]];
+                const metricCols = [...metrics.map(m => `<th>${m.label}</th>`), ...(hasCorr ? [`<th>Corr(${loadedSymbols[0]})</th>`] : [])].join('');
                 const rows = [];
                 for (const p of periods) {
-                    for (const m of metricsWithCorr) {
-                        const cells = loadedSymbols.map((sym, i) => {
-                            if (m.key === 'corr') {
-                                if (i === 0) return `<td style="color:#6b7280">—</td>`;
-                                const val = calcCorrelation(refData, state.tickerData[sym], p.months, state.currency);
-                                if (val == null) return `<td class="na">N/A</td>`;
-                                return `<td>${m.fmt(val)}</td>`;
-                            }
+                    loadedSymbols.forEach((sym, i) => {
+                        const color = CHART_COLORS[i % CHART_COLORS.length];
+                        const periodCell = i === 0 ? `<td rowspan="${loadedSymbols.length}" style="vertical-align:middle">${p.label}</td>` : '';
+                        const cells = metrics.map(m => {
                             const val = m.fn(state.tickerData[sym], p.months, state.currency);
                             if (val == null) return `<td class="na">N/A</td>`;
                             return `<td class="${m.cls(val)}">${m.fmt(val)}</td>`;
                         }).join('');
-                        const label = m === metricsWithCorr[0] ? `<td rowspan="${metricsWithCorr.length}" style="vertical-align:middle">${p.label}</td>` : '';
-                        rows.push(`<tr>${label}<td style="color:#6b7280;font-size:0.75rem">${m.label}</td>${cells}</tr>`);
-                    }
+                        let corrCell = '';
+                        if (hasCorr) {
+                            if (i === 0) { corrCell = `<td style="color:#6b7280">—</td>`; }
+                            else {
+                                const val = calcCorrelation(refData, state.tickerData[sym], p.months, state.currency);
+                                corrCell = val == null ? `<td class="na">N/A</td>` : `<td>${val.toFixed(2)}</td>`;
+                            }
+                        }
+                        rows.push(`<tr>${periodCell}<td style="color:${color};font-weight:600;font-size:0.75rem">${sym}</td>${cells}${corrCell}</tr>`);
+                    });
                 }
                 tableHTML = `<table class="perf-table">
-                    <thead><tr><th>Period</th><th></th>${thCols}</tr></thead>
+                    <thead><tr><th>Period</th><th></th>${metricCols}</tr></thead>
                     <tbody>${rows.join('')}</tbody>
                 </table>`;
             } else if (loadedSymbols.length === 1) {
@@ -993,6 +1200,66 @@
                 rebalSelect.addEventListener('change', (e) => {
                     panel.rebalance = rebalSelect.value;
                     renderPanelContent(panel);
+                });
+            }
+
+            // Optimizer event handlers
+            const toggleOptimizerLink = card.querySelector('[data-toggle-optimizer]');
+            if (toggleOptimizerLink) {
+                toggleOptimizerLink.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    panel.showOptimizer = !panel.showOptimizer;
+                    renderPanelContent(panel);
+                });
+            }
+            card.querySelectorAll('[data-opt-weight]').forEach(input => {
+                input.addEventListener('change', () => {
+                    panel.optimizeWeights[input.dataset.optWeight] = Math.max(0, parseFloat(input.value) || 0);
+                });
+            });
+            card.querySelectorAll('[data-opt-bound-min]').forEach(input => {
+                input.addEventListener('change', () => {
+                    const sym = input.dataset.optBoundMin;
+                    if (!panel.optimizeBounds[sym]) panel.optimizeBounds[sym] = [0, 100];
+                    panel.optimizeBounds[sym][0] = parseFloat(input.value) || 0;
+                });
+            });
+            card.querySelectorAll('[data-opt-bound-max]').forEach(input => {
+                input.addEventListener('change', () => {
+                    const sym = input.dataset.optBoundMax;
+                    if (!panel.optimizeBounds[sym]) panel.optimizeBounds[sym] = [0, 100];
+                    panel.optimizeBounds[sym][1] = parseFloat(input.value) || 0;
+                });
+            });
+            const totalMinInput = card.querySelector('[data-opt-total-min]');
+            if (totalMinInput) {
+                totalMinInput.addEventListener('change', () => {
+                    panel.optimizeTotalBounds[0] = parseFloat(totalMinInput.value) || 0;
+                });
+            }
+            const totalMaxInput = card.querySelector('[data-opt-total-max]');
+            if (totalMaxInput) {
+                totalMaxInput.addEventListener('change', () => {
+                    panel.optimizeTotalBounds[1] = parseFloat(totalMaxInput.value) || 0;
+                });
+            }
+            const runOptBtn = card.querySelector('[data-run-optimize]');
+            if (runOptBtn) {
+                runOptBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const progressContainer = card.querySelector('[data-opt-progress-container]');
+                    runOptBtn.disabled = true;
+                    runOptBtn.style.opacity = '0.5';
+                    if (progressContainer) progressContainer.style.display = 'block';
+                    await optimizePortfolio(panel);
+                    renderPanelContent(panel);
+                });
+            }
+            const stopOptBtn = card.querySelector('[data-stop-optimize]');
+            if (stopOptBtn) {
+                stopOptBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    panel._optimizeAbort = true;
                 });
             }
 
@@ -1420,7 +1687,7 @@
 
         // ── Panel management ──
         function createPanel(symbols) {
-            const panel = { id: nextPanelId++, symbols: [...symbols], chartRange: 36, colSpan: 1, mode: 'comparison', weights: {}, cashRate: 0, rebalance: 'monthly', name: '', subPortfolios: [] };
+            const panel = { id: nextPanelId++, symbols: [...symbols], chartRange: 36, colSpan: 1, mode: 'comparison', weights: {}, cashRate: 0, rebalance: 'monthly', name: '', subPortfolios: [], optimizeWeights: { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: {}, optimizeTotalBounds: [0, 100], showOptimizer: false };
             state.panels.push(panel);
             return panel;
         }
@@ -1545,6 +1812,10 @@
             newPanel.chartRange = original.chartRange;
             newPanel.subPortfolios = original.subPortfolios.map(sp => ({ ...sp, symbols: [...sp.symbols], weights: { ...sp.weights } }));
             newPanel.name = getNextCopyName(original.name || 'Portfolio');
+            newPanel.optimizeWeights = { ...original.optimizeWeights };
+            newPanel.optimizeBounds = JSON.parse(JSON.stringify(original.optimizeBounds));
+            newPanel.optimizeTotalBounds = [...original.optimizeTotalBounds];
+            newPanel.showOptimizer = original.showOptimizer;
             createPanelCard(newPanel);
         }
 
@@ -1680,6 +1951,10 @@
                         rebalance: panel.rebalance,
                         name: panel.name,
                         subPortfolios: panel.subPortfolios.map(sp => ({ name: sp.name, symbols: [...sp.symbols], weights: { ...sp.weights }, cashRate: sp.cashRate, rebalance: sp.rebalance })),
+                        optimizeWeights: { ...panel.optimizeWeights },
+                        optimizeBounds: JSON.parse(JSON.stringify(panel.optimizeBounds)),
+                        optimizeTotalBounds: [...panel.optimizeTotalBounds],
+                        showOptimizer: panel.showOptimizer,
                     });
                 }
             });
@@ -1738,7 +2013,7 @@
 
                 // Create panels with saved layout
                 for (const sp of workspace.panels) {
-                    const panel = { id: nextPanelId++, symbols: [...sp.symbols], chartRange: sp.chartRange || 36, colSpan: sp.colSpan || 1, mode: sp.mode || 'comparison', weights: sp.weights ? { ...sp.weights } : {}, cashRate: sp.cashRate || 0, rebalance: sp.rebalance || 'monthly', name: sp.name || '', subPortfolios: (sp.subPortfolios || []).map(sub => ({ name: sub.name || '', symbols: [...sub.symbols], weights: { ...sub.weights }, cashRate: sub.cashRate || 0, rebalance: sub.rebalance || 'monthly' })) };
+                    const panel = { id: nextPanelId++, symbols: [...sp.symbols], chartRange: sp.chartRange || 36, colSpan: sp.colSpan || 1, mode: sp.mode || 'comparison', weights: sp.weights ? { ...sp.weights } : {}, cashRate: sp.cashRate || 0, rebalance: sp.rebalance || 'monthly', name: sp.name || '', subPortfolios: (sp.subPortfolios || []).map(sub => ({ name: sub.name || '', symbols: [...sub.symbols], weights: { ...sub.weights }, cashRate: sub.cashRate || 0, rebalance: sub.rebalance || 'monthly' })), optimizeWeights: sp.optimizeWeights ? { ...sp.optimizeWeights } : { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: sp.optimizeBounds ? JSON.parse(JSON.stringify(sp.optimizeBounds)) : {}, optimizeTotalBounds: sp.optimizeTotalBounds ? [...sp.optimizeTotalBounds] : [0, 100], showOptimizer: sp.showOptimizer || false };
                     state.panels.push(panel);
                     const card = document.createElement('div');
                     card.className = 'ticker-card';

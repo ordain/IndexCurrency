@@ -1,9 +1,13 @@
 package org.example.indexcurrency.model;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 
 public class ChartData {
     private String symbol;
@@ -11,6 +15,7 @@ public class ChartData {
     private String shortName;
     private String exchangeTimezoneName;
     private String fetchedRange;
+    private String source = "yahoo";
     private final List<Long> timestamps = new ArrayList<>();
     private final List<Double> open = new ArrayList<>();
     private final List<Double> high = new ArrayList<>();
@@ -18,6 +23,9 @@ public class ChartData {
     private final List<Double> close = new ArrayList<>();
     private final List<Double> adjClose = new ArrayList<>();
     private final List<Long> volume = new ArrayList<>();
+    // Per-row cash dividend paid on that date (ex-date), 0 when none. Kept alongside raw close and
+    // adjClose so "raw vs. dividend-adjusted" can become a display switch without re-fetching.
+    private final List<Double> dividends = new ArrayList<>();
 
     public String getSymbol() { return symbol; }
     public void setSymbol(String symbol) { this.symbol = symbol; }
@@ -29,6 +37,8 @@ public class ChartData {
     public void setExchangeTimezoneName(String tz) { this.exchangeTimezoneName = tz; }
     public String getFetchedRange() { return fetchedRange; }
     public void setFetchedRange(String fetchedRange) { this.fetchedRange = fetchedRange; }
+    public String getSource() { return source; }
+    public void setSource(String source) { this.source = source; }
 
     public List<Long> getTimestamps() { return timestamps; }
     public List<Double> getOpen() { return open; }
@@ -37,8 +47,13 @@ public class ChartData {
     public List<Double> getClose() { return close; }
     public List<Double> getAdjClose() { return adjClose; }
     public List<Long> getVolume() { return volume; }
+    public List<Double> getDividends() { return dividends; }
 
     public void addRow(long ts, double o, double h, double l, double c, double ac, long v) {
+        addRow(ts, o, h, l, c, ac, v, 0.0);
+    }
+
+    public void addRow(long ts, double o, double h, double l, double c, double ac, long v, double div) {
         timestamps.add(ts);
         open.add(o);
         high.add(h);
@@ -46,6 +61,7 @@ public class ChartData {
         close.add(c);
         adjClose.add(ac);
         volume.add(v);
+        dividends.add(div);
     }
 
     public long getLastTimestamp() {
@@ -58,7 +74,60 @@ public class ChartData {
         for (int i = 0; i < newer.timestamps.size(); i++) {
             if (newer.timestamps.get(i) > lastTs) {
                 addRow(newer.timestamps.get(i), newer.open.get(i), newer.high.get(i),
-                        newer.low.get(i), newer.close.get(i), newer.adjClose.get(i), newer.volume.get(i));
+                        newer.low.get(i), newer.close.get(i), newer.adjClose.get(i), newer.volume.get(i),
+                        newer.dividends.get(i));
+            }
+        }
+    }
+
+    /** Map ex-date&rarr;amount dividends onto rows, placing each on the first row on/after its ex-date. */
+    public void applyDividends(NavigableMap<LocalDate, Double> exDateToAmount) {
+        applyDividends(exDateToAmount, Long.MIN_VALUE);
+    }
+
+    /**
+     * Fill the dividend column from an ex-date&rarr;amount map. Each dividend lands on the first row whose
+     * date is on/after its ex-date. Only rows with timestamp &gt; {@code afterTsExclusive} are touched
+     * ({@link Long#MIN_VALUE} for all rows), so an incremental refresh can add newly-announced dividends
+     * without double-counting ones already recorded.
+     */
+    public void applyDividends(NavigableMap<LocalDate, Double> exDateToAmount, long afterTsExclusive) {
+        if (exDateToAmount == null || exDateToAmount.isEmpty() || timestamps.isEmpty()) return;
+        for (Map.Entry<LocalDate, Double> e : exDateToAmount.entrySet()) {
+            Double amt = e.getValue();
+            if (amt == null || amt <= 0) continue;
+            long exEpoch = e.getKey().atStartOfDay(ZoneOffset.UTC).toEpochSecond();
+            int idx = firstRowOnOrAfter(exEpoch);
+            if (idx < 0 || timestamps.get(idx) <= afterTsExclusive) continue;
+            dividends.set(idx, dividends.get(idx) + amt);
+        }
+    }
+
+    /** Index of the first (ascending) row whose timestamp is &ge; the given epoch, or -1 if none. */
+    private int firstRowOnOrAfter(long epochSeconds) {
+        int lo = 0, hi = timestamps.size() - 1, ans = -1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (timestamps.get(mid) >= epochSeconds) { ans = mid; hi = mid - 1; }
+            else lo = mid + 1;
+        }
+        return ans;
+    }
+
+    /**
+     * Recompute adjClose from raw close and the dividend column using standard back-adjustment: walking
+     * newest&rarr;oldest, each ex-dividend scales every earlier close by {@code (1 - dividend/prevClose)}.
+     * Use for sources (investing.com) whose prices are not dividend-adjusted; Yahoo already supplies its
+     * own split-inclusive adjClose and must not be recomputed here.
+     */
+    public void recomputeAdjCloseFromDividends() {
+        double factor = 1.0;
+        for (int i = close.size() - 1; i >= 0; i--) {
+            adjClose.set(i, close.get(i) * factor);
+            double div = dividends.get(i);
+            if (div > 0 && i > 0) {
+                double prevClose = close.get(i - 1);
+                if (prevClose > 0) factor *= (1.0 - div / prevClose);
             }
         }
     }
@@ -91,6 +160,24 @@ public class ChartData {
         result.put("meta", meta);
         result.put("timestamp", new ArrayList<>(timestamps));
         result.put("indicators", indicators);
+
+        // Mirror Yahoo's events.dividends structure so a future "raw vs. adjusted" toggle has the
+        // dividend amounts client-side. Keyed by the paying row's timestamp.
+        Map<String, Object> divMap = new LinkedHashMap<>();
+        for (int i = 0; i < dividends.size(); i++) {
+            double d = dividends.get(i);
+            if (d > 0) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("amount", d);
+                entry.put("date", timestamps.get(i));
+                divMap.put(String.valueOf(timestamps.get(i)), entry);
+            }
+        }
+        if (!divMap.isEmpty()) {
+            Map<String, Object> events = new LinkedHashMap<>();
+            events.put("dividends", divMap);
+            result.put("events", events);
+        }
 
         Map<String, Object> chart = new LinkedHashMap<>();
         chart.put("result", List.of(result));
