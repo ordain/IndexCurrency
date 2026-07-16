@@ -26,16 +26,19 @@ public class CsvCacheService {
     private final Path cacheDir;
     private final YahooFinanceService yahooService;
     private final InvestingFinanceService investingService;
+    private final HandelsbankenFinanceService handelsbankenService;
     private final GitCacheService gitService;
     private final ConcurrentHashMap<String, ReentrantLock> symbolLocks = new ConcurrentHashMap<>();
 
     public CsvCacheService(@Value("${cache.dir:cache}") String cacheDir,
                            YahooFinanceService yahooService,
                            InvestingFinanceService investingService,
+                           HandelsbankenFinanceService handelsbankenService,
                            GitCacheService gitService) {
         this.cacheDir = Path.of(cacheDir);
         this.yahooService = yahooService;
         this.investingService = investingService;
+        this.handelsbankenService = handelsbankenService;
         this.gitService = gitService;
     }
 
@@ -86,9 +89,11 @@ public class CsvCacheService {
                 log.info("Cache stale for {} (file written {}s ago, source={}), fetching incremental",
                         symbol, fileAge, cached.getSource());
                 try {
-                    ChartData incremental = "investing".equals(cached.getSource())
-                            ? investingService.fetchIncremental(symbol, lastTs)
-                            : yahooService.fetchIncremental(symbol, lastTs, interval);
+                    ChartData incremental = switch (cached.getSource()) {
+                        case "investing" -> investingService.fetchIncremental(symbol, lastTs);
+                        case "handelsbanken" -> handelsbankenService.fetchIncremental(symbol, lastTs);
+                        default -> yahooService.fetchIncremental(symbol, lastTs, interval);
+                    };
                     cached.merge(incremental);
                     if ("investing".equals(cached.getSource())) {
                         // Newly appended investing.com rows are always recent (within Yahoo's coverage),
@@ -125,6 +130,11 @@ public class CsvCacheService {
      * and vice versa. When investing.com wins we borrow Yahoo's richer metadata (currency, name, tz).
      */
     private ChartData fetchBest(String symbol, String range, String interval) {
+        // ISINs are fund identifiers Yahoo/investing.com don't index; serve them from Handelsbanken only.
+        if (HandelsbankenFinanceService.isIsin(symbol)) {
+            return handelsbankenService.fetchChart(symbol, range);
+        }
+
         ChartData yahoo = null;
         try {
             yahoo = yahooService.fetchChart(symbol, range, interval);
