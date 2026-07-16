@@ -98,6 +98,63 @@
         }
 
         @media (max-width: 540px) { main { grid-template-columns: 1fr; padding: 0.8rem; } header { padding: 0.8rem; } }
+
+        /* ── Quilt chart (periodic table of returns) ──
+           Each series keeps one colour across every year column, so the eye can trace a single
+           holding as it rises and falls in the ranking. Rank gutter encodes best→worst order. */
+        .quilt-wrap { overflow-x: auto; margin: 0 -0.2rem; padding: 0 0.2rem 0.3rem; }
+        table.quilt { border-collapse: separate; border-spacing: 4px; }
+        table.quilt th.quilt-year {
+            font-size: 0.72rem; font-weight: 700; color: #6b7280; text-align: center;
+            padding: 0 0 0.35rem; letter-spacing: 0.04em;
+        }
+        table.quilt th.quilt-rank-h { width: 1.4rem; }
+        table.quilt td.quilt-rank {
+            font-size: 0.68rem; font-weight: 600; color: #9ca3af; text-align: right;
+            padding-right: 0.35rem; font-variant-numeric: tabular-nums; vertical-align: middle;
+        }
+        .quilt-cell {
+            border-radius: 5px; padding: 0.35rem 0.5rem; min-width: 4.6rem; max-width: 8rem;
+            line-height: 1.15; transition: transform 0.1s, box-shadow 0.1s;
+        }
+        .quilt-cell:hover { transform: translateY(-1px); box-shadow: 0 2px 6px rgba(0,0,0,0.18); }
+        .quilt-cell .qs {
+            font-size: 0.72rem; font-weight: 700; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        .quilt-cell .qr {
+            font-size: 0.78rem; font-weight: 600; margin-top: 1px;
+            font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+            font-variant-numeric: tabular-nums;
+        }
+        .quilt-legend { display: flex; flex-wrap: wrap; gap: 0.35rem 0.8rem; margin-top: 0.8rem; }
+        .quilt-legend .qi { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.74rem; color: #374151; }
+        .quilt-legend .qsw { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+        .quilt-legend .qx {
+            background: none; border: none; color: #9ca3af; cursor: pointer;
+            font-size: 0.95rem; line-height: 1; padding: 0 1px; margin-left: 1px;
+        }
+        .quilt-legend .qx:hover { color: #ef4444; }
+        .quilt-empty { color: #6b7280; font-size: 0.85rem; padding: 1.2rem 0.2rem; line-height: 1.5; }
+        /* Estimated (proxy-backfilled) cells: diagonal hatch over the series colour. */
+        .quilt-cell.est {
+            background-image: repeating-linear-gradient(45deg,
+                transparent, transparent 4px,
+                rgba(255,255,255,0.38) 4px, rgba(255,255,255,0.38) 5.5px);
+        }
+        .quilt-estnote { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.5rem; font-size: 0.72rem; color: #6b7280; }
+        .quilt-estswatch {
+            width: 14px; height: 12px; border-radius: 3px; flex: none; background: #9ca3af;
+            background-image: repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(255,255,255,0.55) 3px, rgba(255,255,255,0.55) 4.5px);
+        }
+        /* Per-ticker backfill control on single-ticker cards. */
+        .backfill-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin: 0.1rem 0 0.6rem; font-size: 0.78rem; color: #6b7280; }
+        .backfill-row .backfill-label { font-size: 0.76rem; }
+        .backfill-row input[data-backfill-proxy] {
+            width: 90px; padding: 0.15rem 0.35rem; border: 1px solid #d1d5db; border-radius: 4px;
+            font-size: 0.76rem; text-transform: uppercase;
+        }
+        .backfill-row .backfill-note { color: #6b7280; font-size: 0.72rem; }
     </style>
 </head>
 <body>
@@ -113,6 +170,7 @@
             </select>
             <input id="ticker-input" type="text" placeholder="Add ticker or ISIN" style="width:170px">
             <button id="add-btn">Add</button>
+            <button id="add-quilt-btn" title="Add a panel ranking every ticker and portfolio by calendar-year return">Quilt chart</button>
             <span style="color:rgba(255,255,255,0.3);margin:0 0.2rem">|</span>
             <button id="save-ws-btn">Save workspace</button>
             <input id="ws-code-input" type="text" placeholder="Workspace code" style="width:110px">
@@ -142,7 +200,10 @@
         const state = {
             panels: [],       // { id, symbols[] }
             currency: 'USD',
-            tickerData: {},   // symbol -> { timestamps[], adjClose[], currency, name }
+            tickerData: {},   // symbol -> { timestamps[], adjClose[], currency, name, proxyRealStart?, proxySymbol? }
+            rawSeries: {},    // symbol -> original fetched series before any proxy splice
+            proxyCache: {},   // proxySymbol -> fetched series (proxies that aren't themselves displayed)
+            proxyBackfill: {},// symbol -> proxy symbol used to estimate history before the fund's inception
             forexData: {},    // pairKey -> { timestamps[], rates[] }
             charts: {},       // panelId -> Chart instance
         };
@@ -201,7 +262,7 @@
 
         // ── Fetching ──
         async function fetchYahooChart(symbol) {
-            const url = `${API_BASE}${encodeURIComponent(symbol)}?range=10y&interval=1d`;
+            const url = `${API_BASE}${encodeURIComponent(symbol)}?range=20y&interval=1d`;
             const resp = await fetch(url, { signal: AbortSignal.timeout(30000) });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const json = await resp.json();
@@ -816,6 +877,7 @@
         function renderPanelContent(panel) {
             const card = document.getElementById(`panel-${panel.id}`);
             if (!card) return;
+            if (panel.mode === 'quilt') { renderQuilt(panel, card); return; }
             const isMulti = panel.symbols.length > 1;
             const loadedSymbols = panel.symbols.filter(s => state.tickerData[s]);
             const pendingSymbols = panel.symbols.filter(s => !state.tickerData[s]);
@@ -963,6 +1025,16 @@
             } else {
                 const sym = panel.symbols[0];
                 const data = state.tickerData[sym];
+                const proxy = state.proxyBackfill[sym] || '';
+                const inceptionTs = data ? realStartOf(sym) : null;
+                const inceptionStr = inceptionTs ? new Date(inceptionTs * 1000).toISOString().slice(0, 10) : '';
+                const backfillHTML = data ? `
+                    <div class="backfill-row">
+                        <span class="backfill-label">Backfill before ${inceptionStr} with</span>
+                        <input type="text" data-backfill-proxy value="${esc(proxy)}" placeholder="proxy ticker" spellcheck="false">
+                        <button class="split-btn" data-backfill-apply title="Estimate earlier history from this proxy">Apply</button>
+                        ${proxy ? `<span class="backfill-note" title="Values before ${inceptionStr} are estimated from ${esc(proxy)}">▨ est. from ${esc(proxy)}</span>` : ''}
+                    </div>` : '';
                 headerHTML = `
                     <div class="card-header">
                         <div>
@@ -970,7 +1042,8 @@
                             <div class="subtitle">${data ? `${data.name} (native: ${data.currency})` : 'Loading...'}</div>
                         </div>
                         <button class="remove-btn" data-panel-remove="${panel.id}" title="Remove">&times;</button>
-                    </div>`;
+                    </div>
+                    ${backfillHTML}`;
             }
 
             // Price display
@@ -1145,6 +1218,14 @@
                 nameInput.addEventListener('change', () => {
                     panel.name = nameInput.value;
                 });
+            }
+
+            // Backfill proxy input (single-ticker cards)
+            const backfillInput = card.querySelector('[data-backfill-proxy]');
+            if (backfillInput) {
+                const apply = () => setBackfill(panel.symbols[0], backfillInput.value);
+                card.querySelector('[data-backfill-apply]')?.addEventListener('click', (e) => { e.stopPropagation(); apply(); });
+                backfillInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
             }
 
             // Copy button
@@ -1696,6 +1777,8 @@
             const target = findPanel(targetPanelId);
             const source = findPanel(sourcePanelId);
             if (!target || !source) return;
+            // The quilt aggregates every panel; it has no symbols of its own, so never merge into/from it.
+            if (target.mode === 'quilt' || source.mode === 'quilt') return;
 
             const isTargetPortfolioType = target.mode === 'portfolio' || target.mode === 'portfolioComparison';
             const isSourcePortfolioType = source.mode === 'portfolio' || source.mode === 'portfolioComparison';
@@ -1752,6 +1835,7 @@
             }
             const card = document.getElementById(`panel-${panelId}`);
             if (card) card.remove();
+            if (panel.mode !== 'quilt') renderQuilts(); // a removed series may widen the common-year span
         }
 
         function removeSymbolFromPanel(panelId, symbol) {
@@ -1888,16 +1972,364 @@
             renderPanelContent(panel);
         }
 
+        // ── Proxy-splice backfill ──
+        // A fund (e.g. AVUV, launched 2019) can be extended before its inception with a longer-history
+        // proxy (e.g. DFSVX): the proxy's returns are chained onto the fund's first price so the series is
+        // continuous. Pre-inception values are ESTIMATES and are flagged wherever they surface.
+        function spliceProxy(raw, proxy) {
+            if (!raw || !proxy || raw.timestamps.length === 0 || proxy.timestamps.length === 0) return null;
+            const t0 = raw.timestamps[0];
+            if (proxy.timestamps[0] >= t0) return null; // proxy adds no earlier history
+
+            // Anchor the proxy to the fund's first price, working in the fund's native currency.
+            const anchorIdx = closestIndex(proxy.timestamps, t0);
+            const anchorPrice = convertPrice(proxy.adjClose[anchorIdx], proxy.currency, raw.currency, proxy.timestamps[anchorIdx]);
+            if (anchorPrice == null || anchorPrice === 0) return null;
+            const ratio = raw.adjClose[0] / anchorPrice;
+
+            const timestamps = [], adjClose = [];
+            for (let i = 0; i < proxy.timestamps.length && proxy.timestamps[i] < t0; i++) {
+                const v = convertPrice(proxy.adjClose[i], proxy.currency, raw.currency, proxy.timestamps[i]);
+                if (v == null) continue;
+                timestamps.push(proxy.timestamps[i]);
+                adjClose.push(v * ratio);
+            }
+            for (let i = 0; i < raw.timestamps.length; i++) {
+                timestamps.push(raw.timestamps[i]);
+                adjClose.push(raw.adjClose[i]);
+            }
+            return {
+                timestamps, adjClose, currency: raw.currency, name: raw.name,
+                proxyRealStart: t0, proxySymbol: proxy.symbol || null,
+            };
+        }
+
+        // Set state.tickerData[sym] from its raw series, applying the configured proxy backfill if any.
+        async function applyBackfill(sym) {
+            const raw = state.rawSeries[sym];
+            if (!raw) return;
+            const proxySym = state.proxyBackfill[sym];
+            const passthrough = () => { state.tickerData[sym] = { timestamps: raw.timestamps, adjClose: raw.adjClose, currency: raw.currency, name: raw.name }; };
+            if (!proxySym) { passthrough(); return; }
+
+            let proxy = state.rawSeries[proxySym] || state.proxyCache[proxySym];
+            if (!proxy) {
+                try { proxy = await fetchYahooChart(proxySym); state.proxyCache[proxySym] = proxy; }
+                catch (e) { console.warn(`Backfill proxy ${proxySym} failed for ${sym}:`, e.message); passthrough(); return; }
+            }
+            state.tickerData[sym] = spliceProxy(raw, proxy) || { timestamps: raw.timestamps, adjClose: raw.adjClose, currency: raw.currency, name: raw.name };
+        }
+
+        // Configure (or clear) a ticker's backfill proxy, then re-render its panel and any quilts.
+        async function setBackfill(sym, proxySym) {
+            proxySym = (proxySym || '').trim().toUpperCase();
+            if (proxySym === sym) proxySym = ''; // a fund can't proxy itself
+            if (proxySym) state.proxyBackfill[sym] = proxySym; else delete state.proxyBackfill[sym];
+            await applyBackfill(sym);
+            const panel = findPanelBySymbol(sym);
+            if (panel) renderPanelContent(panel);
+            renderQuilts();
+        }
+
+        // The date a series' real (non-estimated) data begins, as an epoch second.
+        function realStartOf(sym) {
+            const d = state.tickerData[sym];
+            if (!d) return null;
+            return d.proxyRealStart || (d.timestamps.length ? d.timestamps[0] : null);
+        }
+
+        // ── Quilt chart (annual returns, ranked best→worst) ──
+        // Fixed, distinguishable palette; each series keeps its colour across every year column.
+        const QUILT_PALETTE = [
+            '#2563eb','#dc2626','#059669','#d97706','#7c3aed','#0891b2','#db2777','#4f46e5',
+            '#ca8a04','#0d9488','#e11d48','#65a30d','#9333ea','#0284c7','#ea580c','#0f766e',
+        ];
+
+        function esc(s) {
+            return String(s).replace(/[&<>"']/g, c =>
+                ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        function startOfYearTs(year) { return Date.UTC(year, 0, 1) / 1000; }
+
+        // Last index whose timestamp is <= target, or -1 if none (timestamps ascending).
+        function lastIdxAtOrBefore(timestamps, target) {
+            let lo = 0, hi = timestamps.length - 1, ans = -1;
+            while (lo <= hi) {
+                const mid = (lo + hi) >> 1;
+                if (timestamps[mid] <= target) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+            }
+            return ans;
+        }
+
+        // Calendar-year returns from a value series (converted prices or a portfolio index).
+        // A year Y is "complete" only if the series has a real year-end value for both Y and Y-1,
+        // i.e. it spans from before Y began through within ~2 weeks of Dec 31 — so partial inception
+        // years and the current unfinished year are naturally excluded. Returns Map<year, pct>.
+        function annualReturnsFromSeries(timestamps, values) {
+            const out = new Map();
+            if (!timestamps || timestamps.length < 2) return out;
+            const YEAR_END_TOL = 14 * 86400; // last trading day sits within ~2 weeks of the year boundary
+            const lastTs = timestamps[timestamps.length - 1];
+            const firstYear = new Date(timestamps[0] * 1000).getUTCFullYear();
+            const lastYear = new Date(lastTs * 1000).getUTCFullYear();
+
+            const yearEndValue = (Y) => {
+                const boundary = startOfYearTs(Y + 1);
+                const idx = lastIdxAtOrBefore(timestamps, boundary - 1);
+                if (idx < 0) return null;                                 // no data on/before year end
+                if (timestamps[idx] < boundary - YEAR_END_TOL) return null; // series stops before Y closes
+                const v = values[idx];
+                return (v == null || isNaN(v)) ? null : v;
+            };
+
+            for (let Y = firstYear; Y <= lastYear; Y++) {
+                const endV = yearEndValue(Y);
+                const baseV = yearEndValue(Y - 1);
+                if (endV == null || baseV == null || baseV === 0) continue;
+                out.set(Y, (endV / baseV - 1) * 100);
+            }
+            return out;
+        }
+
+        // Full-history value series for one ticker, converted to the display currency.
+        function tickerValueSeries(sym, currency) {
+            const data = state.tickerData[sym];
+            if (!data || data.timestamps.length === 0) return null;
+            const timestamps = [], values = [];
+            for (let i = 0; i < data.timestamps.length; i++) {
+                const v = convertPrice(data.adjClose[i], data.currency, currency, data.timestamps[i]);
+                if (v != null && !isNaN(v)) { timestamps.push(data.timestamps[i]); values.push(v); }
+            }
+            return timestamps.length > 1 ? { timestamps, values } : null;
+        }
+
+        // Months of history available for a set of symbols (bounded by the latest-starting one). One
+        // month of slack keeps the cutoff just after the data begins, since the portfolio engine returns
+        // null for any window that starts before its data does.
+        function fullHistoryMonths(symbols) {
+            let maxStart = 0;
+            for (const s of symbols) {
+                const d = state.tickerData[s];
+                if (!d || d.timestamps.length === 0) return 0;
+                maxStart = Math.max(maxStart, d.timestamps[0]);
+            }
+            if (maxStart === 0) return 0;
+            const months = Math.floor((Date.now() / 1000 - maxStart) / (30.44 * 86400));
+            return Math.max(1, months - 1);
+        }
+
+        // Full-history portfolio index (base 100) as a value series, reusing the portfolio engine.
+        function portfolioValueSeries(symbols, weights, cashRate, currency, rebalance) {
+            if (!symbols || symbols.length === 0) return null;
+            const months = fullHistoryMonths(symbols);
+            if (months === 0) return null;
+            const pts = getPortfolioChartData(symbols, weights, cashRate, currency, months, rebalance);
+            if (!pts || pts.length < 2) return null;
+            return { timestamps: pts.map(p => Math.round(p.x / 1000)), values: pts.map(p => p.y) };
+        }
+
+        // The latest real-data start among a portfolio's backfilled holdings: years before it are
+        // estimates for the portfolio (at least one constituent was still proxy-sourced). 0 if none.
+        function portfolioEstBefore(symbols) {
+            let est = 0;
+            for (const s of symbols) {
+                const d = state.tickerData[s];
+                if (d && d.proxyRealStart) est = Math.max(est, d.proxyRealStart);
+            }
+            return est;
+        }
+
+        // Every distinct series currently on screen: each unique ticker, plus each portfolio and
+        // each sub-portfolio of a comparison panel. `estBefore` marks where estimated (backfilled) data ends.
+        function collectQuiltSeries(currency) {
+            const series = [];
+            const seen = new Set();
+            for (const sym of allSymbols()) {
+                if (seen.has(sym)) continue;
+                seen.add(sym);
+                const vs = tickerValueSeries(sym, currency);
+                if (!vs) continue;
+                const data = state.tickerData[sym];
+                series.push({ key: 't:' + sym, label: sym, full: (data && data.name) || sym, estBefore: (data && data.proxyRealStart) || 0, ...vs });
+            }
+            for (const panel of state.panels) {
+                if (panel.mode === 'portfolio' && panel.symbols.length > 1) {
+                    const loaded = panel.symbols.filter(s => state.tickerData[s]);
+                    const vs = portfolioValueSeries(loaded, panel.weights, panel.cashRate, currency, panel.rebalance);
+                    if (!vs) continue;
+                    const label = panel.name || 'Portfolio';
+                    series.push({ key: 'p:' + panel.id, label, full: `${label} (${loaded.join(', ')})`, estBefore: portfolioEstBefore(loaded), ...vs });
+                } else if (panel.mode === 'portfolioComparison') {
+                    panel.subPortfolios.forEach((sp, i) => {
+                        const loaded = sp.symbols.filter(s => state.tickerData[s]);
+                        const vs = portfolioValueSeries(loaded, sp.weights, sp.cashRate, currency, sp.rebalance);
+                        if (!vs) return;
+                        const label = sp.name || 'Portfolio';
+                        series.push({ key: `p:${panel.id}:${i}`, label, full: `${label} (${loaded.join(', ')})`, estBefore: portfolioEstBefore(loaded), ...vs });
+                    });
+                }
+            }
+            return series;
+        }
+
+        // Assemble the quilt: annual returns per series, restricted to the calendar years complete for
+        // ALL series (the shortest history sets the span). Colours are keyed off the full series set so
+        // they stay stable when some are hidden; `excluded` (a Set of series keys) drops series from this
+        // quilt only — the underlying tickers/portfolios stay on screen.
+        function buildQuiltModel(currency, excluded) {
+            const raw = collectQuiltSeries(currency);
+            const colorOf = {};
+            raw.map(s => s.key).sort().forEach((k, i) => { colorOf[k] = QUILT_PALETTE[i % QUILT_PALETTE.length]; });
+
+            const series = raw
+                .filter(s => !excluded || !excluded.has(s.key))
+                .map(s => {
+                    const returns = annualReturnsFromSeries(s.timestamps, s.values);
+                    return { key: s.key, label: s.label, full: s.full, color: colorOf[s.key], estBefore: s.estBefore || 0, returns, years: new Set(returns.keys()) };
+                })
+                .filter(s => s.years.size > 0);
+
+            if (series.length === 0) return { series: [], years: [] };
+
+            let common = null;
+            for (const s of series) {
+                common = common === null ? new Set(s.years) : new Set([...common].filter(y => s.years.has(y)));
+            }
+            const years = [...common].sort((a, b) => a - b);
+            return { series, years };
+        }
+
+        // Black or white text for legibility on an arbitrary cell colour.
+        function textColorFor(hex) {
+            const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+            const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+            return luminance > 0.62 ? '#1f2937' : '#ffffff';
+        }
+
+        function fmtQuiltPct(v) { return (v >= 0 ? '+' : '') + v.toFixed(1) + '%'; }
+
+        function renderQuilt(panel, card) {
+            if (!panel.excludedSeries) panel.excludedSeries = [];
+            const excluded = new Set(panel.excludedSeries);
+            const model = buildQuiltModel(state.currency, excluded);
+            const yearsNote = model.years.length
+                ? `${model.years[0]}–${model.years[model.years.length - 1]} · ${state.currency}`
+                : 'awaiting data';
+
+            const showAllHTML = panel.excludedSeries.length
+                ? `<button class="split-btn" data-quilt-showall="${panel.id}" title="Bring back the series you've hidden">Show all (${panel.excludedSeries.length})</button>`
+                : '';
+            const headerHTML = `
+                <div class="card-header">
+                    <div>
+                        <h2>Annual returns</h2>
+                        <div class="subtitle">Ranked best to worst each calendar year · ${yearsNote}</div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:4px">
+                        ${showAllHTML}
+                        <button class="split-btn" data-quilt-refresh="${panel.id}" title="Recompute from the tickers and portfolios on screen">Refresh</button>
+                        <button class="remove-btn" data-panel-remove="${panel.id}" title="Remove panel">&times;</button>
+                    </div>
+                </div>`;
+
+            let bodyHTML;
+            if (model.years.length === 0 || model.series.length === 0) {
+                const why = model.series.length === 0
+                    ? (panel.excludedSeries.length
+                        ? 'Every series is hidden. Use “Show all” to bring them back.'
+                        : 'Add some tickers or portfolios, then refresh.')
+                    : 'No calendar year is complete for every series yet — they need at least one shared full year of overlapping history.';
+                bodyHTML = `<div class="quilt-empty">Nothing to weave yet.<br>${why}</div>`;
+            } else {
+                const columns = model.years.map(Y => ({
+                    year: Y,
+                    ranked: model.series
+                        .map(s => ({ s, r: s.returns.get(Y) }))
+                        .sort((a, b) => b.r - a.r),
+                }));
+                const N = model.series.length;
+
+                let rows = '', anyEst = false;
+                for (let r = 0; r < N; r++) {
+                    const cells = columns.map(c => {
+                        const cell = c.ranked[r];
+                        const bg = cell.s.color, fg = textColorFor(bg);
+                        // Estimated if the fund's real data didn't yet cover the start of this year.
+                        const est = cell.s.estBefore && startOfYearTs(c.year) < cell.s.estBefore;
+                        if (est) anyEst = true;
+                        const title = `${esc(cell.s.full)} · ${c.year}: ${fmtQuiltPct(cell.r)}${est ? ' (estimated)' : ''}`;
+                        return `<td><div class="quilt-cell${est ? ' est' : ''}" style="background-color:${bg};color:${fg}" title="${title}">
+                                    <div class="qs">${esc(cell.s.label)}</div>
+                                    <div class="qr">${fmtQuiltPct(cell.r)}</div>
+                                </div></td>`;
+                    }).join('');
+                    rows += `<tr><td class="quilt-rank">${r + 1}</td>${cells}</tr>`;
+                }
+
+                const headerCells = columns.map(c => `<th class="quilt-year">${c.year}</th>`).join('');
+                const legend = model.series
+                    .map(s => `<span class="qi" title="${esc(s.full)}"><span class="qsw" style="background:${s.color}"></span>${esc(s.label)}<button class="qx" data-quilt-exclude="${esc(s.key)}" title="Hide ${esc(s.label)} from this quilt (stays on screen)">&times;</button></span>`)
+                    .join('');
+                const estNote = anyEst
+                    ? `<div class="quilt-estnote"><span class="quilt-estswatch"></span>Hatched cells are estimated from a backfill proxy before the fund existed.</div>`
+                    : '';
+
+                bodyHTML = `
+                    <div class="quilt-wrap">
+                        <table class="quilt">
+                            <thead><tr><th class="quilt-rank-h"></th>${headerCells}</tr></thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+                    <div class="quilt-legend">${legend}</div>
+                    ${estNote}`;
+            }
+
+            card.innerHTML = headerHTML + bodyHTML;
+            card.querySelector(`[data-panel-remove="${panel.id}"]`)?.addEventListener('click', () => removePanel(panel.id));
+            card.querySelector(`[data-quilt-refresh="${panel.id}"]`)?.addEventListener('click', () => renderQuilt(panel, card));
+            card.querySelector(`[data-quilt-showall="${panel.id}"]`)?.addEventListener('click', () => {
+                panel.excludedSeries = [];
+                renderQuilt(panel, card);
+            });
+            card.querySelectorAll('[data-quilt-exclude]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const key = btn.dataset.quiltExclude;
+                    if (!panel.excludedSeries.includes(key)) panel.excludedSeries.push(key);
+                    renderQuilt(panel, card);
+                });
+            });
+        }
+
+        function renderQuilts() {
+            for (const panel of state.panels) {
+                if (panel.mode !== 'quilt') continue;
+                const card = document.getElementById(`panel-${panel.id}`);
+                if (card) renderQuilt(panel, card);
+            }
+        }
+
+        function createQuiltPanel() {
+            const panel = createPanel([]);
+            panel.mode = 'quilt';
+            panel.colSpan = 2; // wider default; the table also scrolls horizontally when narrower
+            panel.excludedSeries = [];
+            createPanelCard(panel);
+        }
+
         // ── Ticker lifecycle ──
         async function loadTicker(symbol) {
             const panel = createPanel([symbol]);
             createPanelCard(panel);
             try {
                 const data = await fetchYahooChart(symbol);
-                state.tickerData[symbol] = data;
+                state.rawSeries[symbol] = data;
+                await applyBackfill(symbol); // sets state.tickerData[symbol] (spliced if a proxy is configured)
                 // Panel may have been merged while loading — find the current panel
                 const currentPanel = findPanelBySymbol(symbol);
                 if (currentPanel) renderPanelContent(currentPanel);
+                renderQuilts(); // new data may extend or reshape the common-year span
             } catch (e) {
                 console.error(`Error loading ${symbol}:`, e);
                 const currentPanel = findPanelBySymbol(symbol);
@@ -1921,7 +2353,7 @@
         function onCurrencyChange() {
             state.currency = currencySelect.value;
             for (const panel of state.panels) {
-                if (panel.symbols.some(s => state.tickerData[s])) {
+                if (panel.mode === 'quilt' || panel.symbols.some(s => state.tickerData[s])) {
                     renderPanelContent(panel);
                 }
             }
@@ -1955,10 +2387,11 @@
                         optimizeBounds: JSON.parse(JSON.stringify(panel.optimizeBounds)),
                         optimizeTotalBounds: [...panel.optimizeTotalBounds],
                         showOptimizer: panel.showOptimizer,
+                        excludedSeries: [...(panel.excludedSeries || [])],
                     });
                 }
             });
-            const workspace = { currency: state.currency, panels: panelsInOrder };
+            const workspace = { currency: state.currency, panels: panelsInOrder, proxyBackfill: { ...state.proxyBackfill } };
             try {
                 const resp = await fetch('/api/workspace', {
                     method: 'POST',
@@ -1996,9 +2429,10 @@
                 state.panels = [];
                 grid.innerHTML = '';
 
-                // Set currency
+                // Set currency and restore backfill proxies before fetching, so splices apply on load.
                 state.currency = workspace.currency || 'USD';
                 currencySelect.value = state.currency;
+                state.proxyBackfill = workspace.proxyBackfill ? { ...workspace.proxyBackfill } : {};
 
                 // Collect all unique symbols needed
                 const allSyms = new Set();
@@ -2013,7 +2447,7 @@
 
                 // Create panels with saved layout
                 for (const sp of workspace.panels) {
-                    const panel = { id: nextPanelId++, symbols: [...sp.symbols], chartRange: sp.chartRange || 36, colSpan: sp.colSpan || 1, mode: sp.mode || 'comparison', weights: sp.weights ? { ...sp.weights } : {}, cashRate: sp.cashRate || 0, rebalance: sp.rebalance || 'monthly', name: sp.name || '', subPortfolios: (sp.subPortfolios || []).map(sub => ({ name: sub.name || '', symbols: [...sub.symbols], weights: { ...sub.weights }, cashRate: sub.cashRate || 0, rebalance: sub.rebalance || 'monthly' })), optimizeWeights: sp.optimizeWeights ? { ...sp.optimizeWeights } : { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: sp.optimizeBounds ? JSON.parse(JSON.stringify(sp.optimizeBounds)) : {}, optimizeTotalBounds: sp.optimizeTotalBounds ? [...sp.optimizeTotalBounds] : [0, 100], showOptimizer: sp.showOptimizer || false };
+                    const panel = { id: nextPanelId++, symbols: [...sp.symbols], chartRange: sp.chartRange || 36, colSpan: sp.colSpan || 1, mode: sp.mode || 'comparison', weights: sp.weights ? { ...sp.weights } : {}, cashRate: sp.cashRate || 0, rebalance: sp.rebalance || 'monthly', name: sp.name || '', subPortfolios: (sp.subPortfolios || []).map(sub => ({ name: sub.name || '', symbols: [...sub.symbols], weights: { ...sub.weights }, cashRate: sub.cashRate || 0, rebalance: sub.rebalance || 'monthly' })), optimizeWeights: sp.optimizeWeights ? { ...sp.optimizeWeights } : { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: sp.optimizeBounds ? JSON.parse(JSON.stringify(sp.optimizeBounds)) : {}, optimizeTotalBounds: sp.optimizeTotalBounds ? [...sp.optimizeTotalBounds] : [0, 100], showOptimizer: sp.showOptimizer || false, excludedSeries: sp.excludedSeries ? [...sp.excludedSeries] : [] };
                     state.panels.push(panel);
                     const card = document.createElement('div');
                     card.className = 'ticker-card';
@@ -2053,13 +2487,14 @@
 
                 // Fetch ticker data for symbols not already loaded
                 showStatus('Loading workspace tickers...');
-                const fetches = [...allSyms].filter(sym => !state.tickerData[sym]).map(async sym => {
+                const fetches = [...allSyms].filter(sym => !state.rawSeries[sym]).map(async sym => {
                     try {
-                        const data = await fetchYahooChart(sym);
-                        state.tickerData[sym] = data;
+                        state.rawSeries[sym] = await fetchYahooChart(sym);
                     } catch (e) { console.error(`Failed to load ${sym}:`, e); }
                 });
                 await Promise.all(fetches);
+                // Apply configured backfills once raw series are in (proxies may fetch additional data).
+                await Promise.all([...allSyms].filter(sym => state.rawSeries[sym]).map(sym => applyBackfill(sym)));
 
                 // Render all panels
                 for (const panel of state.panels) {
@@ -2076,6 +2511,7 @@
         currencySelect.addEventListener('change', onCurrencyChange);
         addBtn.addEventListener('click', () => addTicker(tickerInput.value));
         tickerInput.addEventListener('keydown', e => { if (e.key === 'Enter') addTicker(tickerInput.value); });
+        document.getElementById('add-quilt-btn').addEventListener('click', createQuiltPanel);
         saveWsBtn.addEventListener('click', saveWorkspace);
         loadWsBtn.addEventListener('click', loadWorkspace);
 
