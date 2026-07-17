@@ -886,8 +886,15 @@
             const loadedSymbols = panel.symbols.filter(s => state.tickerData[s]);
             const pendingSymbols = panel.symbols.filter(s => !state.tickerData[s]);
 
-            const isPortfolio = isMulti && panel.mode === 'portfolio';
+            const isPortfolio = panel.mode === 'portfolio'; // a portfolio can hold a single ticker (e.g. leveraged)
             const isPortfolioComparison = panel.mode === 'portfolioComparison';
+
+            // Mode toggle, shared by multi panels and single-ticker cards. For one ticker the plain view is
+            // labelled "Ticker"; for several it's "Comparison". Either way "Portfolio" enables weights/leverage.
+            const modeToggleHTML = `<div class="range-buttons" style="margin-bottom:0.4rem">
+                <button class="range-btn${panel.mode === 'comparison' ? ' active' : ''}" data-mode="comparison">${isMulti ? 'Comparison' : 'Ticker'}</button>
+                <button class="range-btn${panel.mode === 'portfolio' ? ' active' : ''}" data-mode="portfolio">Portfolio</button>
+            </div>`;
 
             // Header
             let headerHTML;
@@ -909,7 +916,7 @@
                         </div>
                     </div>
                     <div class="ticker-badges">${subBadgesHTML}</div>`;
-            } else if (isMulti) {
+            } else if (isMulti || isPortfolio) {
                 const badgesHTML = panel.symbols.map((sym, i) => {
                     const color = CHART_COLORS[i % CHART_COLORS.length];
                     const data = state.tickerData[sym];
@@ -934,11 +941,6 @@
                     ? `Total allocation: ${totalAlloc}%`
                     : 'Normalized performance (base 100)';
 
-                const modeToggleHTML = `<div class="range-buttons" style="margin-bottom:0.4rem">
-                    <button class="range-btn${panel.mode === 'comparison' ? ' active' : ''}" data-mode="comparison">Comparison</button>
-                    <button class="range-btn${panel.mode === 'portfolio' ? ' active' : ''}" data-mode="portfolio">Portfolio</button>
-                </div>`;
-
                 let weightsHTML = '';
                 if (isPortfolio) {
                     const cashWeight = 100 - totalAlloc;
@@ -956,7 +958,7 @@
                         `<option value="${v}"${panel.rebalance === v ? ' selected' : ''}>${v.charAt(0).toUpperCase() + v.slice(1)}</option>`
                     ).join('');
                     let optimizerHTML = '';
-                    if (panel.showOptimizer) {
+                    if (isMulti && panel.showOptimizer) {
                         const ow = panel.optimizeWeights;
                         const inputStyle = 'width:42px;padding:0.15rem 0.2rem;border:1px solid #d1d5db;border-radius:3px;font-size:0.75rem;text-align:right';
                         const boundInputs = panel.symbols.map((sym, i) => {
@@ -995,7 +997,7 @@
                                 </div>
                             </div>
                         </div>`;
-                    } else {
+                    } else if (isMulti) {
                         optimizerHTML = `<div style="margin-bottom:0.5rem">
                             <a href="#" data-toggle-optimizer style="color:#3b82f6;text-decoration:none;font-weight:600;font-size:0.78rem">&#9654; Optimize</a>
                         </div>`;
@@ -1047,7 +1049,8 @@
                         </div>
                         <button class="remove-btn" data-panel-remove="${panel.id}" title="Remove">&times;</button>
                     </div>
-                    ${backfillHTML}`;
+                    ${backfillHTML}
+                    ${data ? modeToggleHTML : ''}`;
             }
 
             // Price display
@@ -1425,8 +1428,8 @@
                         }
                     }
                 });
-            } else if (isMulti && panel.mode === 'portfolio') {
-                // Portfolio mode: single combined line
+            } else if (panel.mode === 'portfolio') {
+                // Portfolio mode: single combined line (works for one ticker too, e.g. leveraged)
                 const chartData = getPortfolioChartData(loadedSymbols, panel.weights, panel.cashRate, cur, panel.chartRange, panel.rebalance);
                 let displayData = chartData;
                 if (chartData.length > 400) {
