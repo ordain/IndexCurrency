@@ -20,6 +20,7 @@
         }
         .controls button { background: #3b82f6; color: white; border: none; cursor: pointer; font-weight: 600; }
         .controls button:hover { background: #2563eb; }
+        .controls button:disabled { opacity: 0.4; cursor: default; background: #3b82f6; }
         #status-bar { background: #fef3c7; color: #92400e; padding: 0.5rem 2rem; font-size: 0.85rem; display: none; }
         #status-bar.error { background: #fee2e2; color: #991b1b; }
         main { padding: 1.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 1.5rem; align-items: start; }
@@ -171,6 +172,9 @@
             <input id="ticker-input" type="text" placeholder="Add ticker or ISIN" style="width:170px">
             <button id="add-btn">Add</button>
             <button id="add-quilt-btn" title="Add a panel ranking every ticker and portfolio by calendar-year return">Quilt chart</button>
+            <span style="color:rgba(255,255,255,0.3);margin:0 0.2rem">|</span>
+            <button id="undo-btn" title="Undo (Ctrl+Z)" disabled>↶ Undo</button>
+            <button id="redo-btn" title="Redo (Ctrl+Shift+Z)" disabled>↷ Redo</button>
             <span style="color:rgba(255,255,255,0.3);margin:0 0.2rem">|</span>
             <button id="save-ws-btn">Save workspace</button>
             <input id="ws-code-input" type="text" placeholder="Workspace code" style="width:110px">
@@ -1341,6 +1345,7 @@
                     if (progressContainer) progressContainer.style.display = 'block';
                     await optimizePortfolio(panel);
                     renderPanelContent(panel);
+                    scheduleRecord(); // optimization finishes async, after the click already settled
                 });
             }
             const stopOptBtn = card.querySelector('[data-stop-optimize]');
@@ -2353,6 +2358,7 @@
             if (!symbol) return;
             loadTicker(symbol); // duplicates are allowed — the same ticker can occupy several panels
             tickerInput.value = '';
+            scheduleRecord(); // the panel is created synchronously; capture it (covers the Enter path)
         }
 
         // ── Currency switch ──
@@ -2370,34 +2376,103 @@
         const loadWsBtn = document.getElementById('load-ws-btn');
         const wsCodeInput = document.getElementById('ws-code-input');
 
-        async function saveWorkspace() {
-            const panelCards = grid.querySelectorAll('.ticker-card');
+        // Serialize the whole workspace (panels in on-screen order) — used for saving and for undo/redo.
+        function snapshotWorkspace() {
             const panelsInOrder = [];
-            panelCards.forEach(card => {
-                const pid = parseInt(card.dataset.panelId);
-                const panel = findPanel(pid);
-                if (panel) {
-                    panelsInOrder.push({
-                        symbols: [...panel.symbols],
-                        chartRange: panel.chartRange,
-                        colSpan: panel.colSpan,
-                        resizeWidth: panel.resizeWidth || null,
-                        resizeHeight: panel.resizeHeight || null,
-                        mode: panel.mode,
-                        weights: { ...panel.weights },
-                        cashRate: panel.cashRate,
-                        rebalance: panel.rebalance,
-                        name: panel.name,
-                        subPortfolios: panel.subPortfolios.map(sp => ({ name: sp.name, symbols: [...sp.symbols], weights: { ...sp.weights }, cashRate: sp.cashRate, rebalance: sp.rebalance })),
-                        optimizeWeights: { ...panel.optimizeWeights },
-                        optimizeBounds: JSON.parse(JSON.stringify(panel.optimizeBounds)),
-                        optimizeTotalBounds: [...panel.optimizeTotalBounds],
-                        showOptimizer: panel.showOptimizer,
-                        excludedSeries: [...(panel.excludedSeries || [])],
-                    });
-                }
+            grid.querySelectorAll('.ticker-card').forEach(card => {
+                const panel = findPanel(parseInt(card.dataset.panelId));
+                if (!panel) return;
+                panelsInOrder.push({
+                    symbols: [...panel.symbols],
+                    chartRange: panel.chartRange,
+                    colSpan: panel.colSpan,
+                    resizeWidth: panel.resizeWidth || null,
+                    resizeHeight: panel.resizeHeight || null,
+                    mode: panel.mode,
+                    weights: { ...panel.weights },
+                    cashRate: panel.cashRate,
+                    rebalance: panel.rebalance,
+                    name: panel.name,
+                    subPortfolios: panel.subPortfolios.map(sp => ({ name: sp.name, symbols: [...sp.symbols], weights: { ...sp.weights }, cashRate: sp.cashRate, rebalance: sp.rebalance })),
+                    optimizeWeights: { ...panel.optimizeWeights },
+                    optimizeBounds: JSON.parse(JSON.stringify(panel.optimizeBounds)),
+                    optimizeTotalBounds: [...panel.optimizeTotalBounds],
+                    showOptimizer: panel.showOptimizer,
+                    excludedSeries: [...(panel.excludedSeries || [])],
+                });
             });
-            const workspace = { currency: state.currency, panels: panelsInOrder, proxyBackfill: { ...state.proxyBackfill } };
+            return { currency: state.currency, panels: panelsInOrder, proxyBackfill: { ...state.proxyBackfill } };
+        }
+
+        // Rebuild all panels and the display from a workspace snapshot, fetching only symbols not yet loaded.
+        async function applyWorkspace(ws) {
+            for (const panel of [...state.panels]) {
+                if (state.charts[panel.id]) { state.charts[panel.id].destroy(); delete state.charts[panel.id]; }
+            }
+            state.panels = [];
+            grid.innerHTML = '';
+
+            state.currency = ws.currency || 'USD';
+            currencySelect.value = state.currency;
+            state.proxyBackfill = { ...(ws.proxyBackfill || {}) };
+
+            const allSyms = new Set();
+            for (const sp of ws.panels) {
+                for (const sym of sp.symbols) allSyms.add(sym);
+                if (sp.subPortfolios) for (const sub of sp.subPortfolios) for (const sym of sub.symbols) allSyms.add(sym);
+            }
+
+            for (const sp of ws.panels) {
+                const panel = { id: nextPanelId++, symbols: [...sp.symbols], chartRange: sp.chartRange || 36, colSpan: sp.colSpan || 1, mode: sp.mode || 'comparison', weights: sp.weights ? { ...sp.weights } : {}, cashRate: sp.cashRate || 0, rebalance: sp.rebalance || 'monthly', name: sp.name || '', subPortfolios: (sp.subPortfolios || []).map(sub => ({ name: sub.name || '', symbols: [...sub.symbols], weights: { ...sub.weights }, cashRate: sub.cashRate || 0, rebalance: sub.rebalance || 'monthly' })), optimizeWeights: sp.optimizeWeights ? { ...sp.optimizeWeights } : { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: sp.optimizeBounds ? JSON.parse(JSON.stringify(sp.optimizeBounds)) : {}, optimizeTotalBounds: sp.optimizeTotalBounds ? [...sp.optimizeTotalBounds] : [0, 100], showOptimizer: sp.showOptimizer || false, excludedSeries: sp.excludedSeries ? [...sp.excludedSeries] : [] };
+                state.panels.push(panel);
+                const card = document.createElement('div');
+                card.className = 'ticker-card';
+                card.id = `panel-${panel.id}`;
+                card.draggable = true;
+                card.dataset.panelId = panel.id;
+                card.addEventListener('dragstart', onDragStart);
+                card.addEventListener('dragend', onDragEnd);
+                card.addEventListener('dragover', onDragOver);
+                card.addEventListener('dragenter', onDragEnter);
+                card.addEventListener('dragleave', onDragLeave);
+                card.addEventListener('drop', onDrop);
+                if (panel.colSpan > 1) card.style.gridColumn = `span ${panel.colSpan}`;
+                if (sp.resizeWidth) card.style.width = sp.resizeWidth + 'px';
+                if (sp.resizeHeight) card.style.height = sp.resizeHeight + 'px';
+
+                const ro = new ResizeObserver(entries => {
+                    for (const entry of entries) {
+                        const w = entry.contentRect.width;
+                        const cols = getComputedStyle(grid).gridTemplateColumns.split(' ');
+                        const colWidth = parseFloat(cols[0]) || 480;
+                        const gap = parseFloat(getComputedStyle(grid).columnGap) || 0;
+                        const span = Math.max(1, Math.min(cols.length, Math.ceil((w + gap) / (colWidth + gap))));
+                        if (span !== panel.colSpan) {
+                            panel.colSpan = span;
+                            card.style.gridColumn = span > 1 ? `span ${span}` : '';
+                        }
+                        panel.resizeWidth = card.offsetWidth;
+                        panel.resizeHeight = card.offsetHeight;
+                    }
+                });
+                ro.observe(card);
+
+                card.innerHTML = '<div class="loading-overlay"><div class="spinner"></div></div>';
+                grid.appendChild(card);
+            }
+
+            const fetches = [...allSyms].filter(sym => !state.rawSeries[sym]).map(async sym => {
+                try { state.rawSeries[sym] = await fetchYahooChart(sym); }
+                catch (e) { console.error(`Failed to load ${sym}:`, e); }
+            });
+            await Promise.all(fetches);
+            await Promise.all([...allSyms].filter(sym => state.rawSeries[sym]).map(sym => applyBackfill(sym)));
+
+            for (const panel of state.panels) renderPanelContent(panel);
+        }
+
+        async function saveWorkspace() {
+            const workspace = snapshotWorkspace();
             try {
                 const resp = await fetch('/api/workspace', {
                     method: 'POST',
@@ -2427,91 +2502,83 @@
                 if (resp.status === 404) { showStatus('Workspace not found', true); setTimeout(() => showStatus(''), 3000); return; }
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const workspace = await resp.json();
-
-                // Clear existing panels
-                for (const panel of [...state.panels]) {
-                    if (state.charts[panel.id]) { state.charts[panel.id].destroy(); delete state.charts[panel.id]; }
-                }
-                state.panels = [];
-                grid.innerHTML = '';
-
-                // Set currency and restore backfill proxies before fetching, so splices apply on load.
-                state.currency = workspace.currency || 'USD';
-                currencySelect.value = state.currency;
                 // Defaults form the base; a saved workspace's explicit proxies override them.
-                state.proxyBackfill = { ...defaultBackfill, ...(workspace.proxyBackfill || {}) };
+                workspace.proxyBackfill = { ...defaultBackfill, ...(workspace.proxyBackfill || {}) };
 
-                // Collect all unique symbols needed
-                const allSyms = new Set();
-                for (const sp of workspace.panels) {
-                    for (const sym of sp.symbols) allSyms.add(sym);
-                    if (sp.subPortfolios) {
-                        for (const sub of sp.subPortfolios) {
-                            for (const sym of sub.symbols) allSyms.add(sym);
-                        }
-                    }
-                }
-
-                // Create panels with saved layout
-                for (const sp of workspace.panels) {
-                    const panel = { id: nextPanelId++, symbols: [...sp.symbols], chartRange: sp.chartRange || 36, colSpan: sp.colSpan || 1, mode: sp.mode || 'comparison', weights: sp.weights ? { ...sp.weights } : {}, cashRate: sp.cashRate || 0, rebalance: sp.rebalance || 'monthly', name: sp.name || '', subPortfolios: (sp.subPortfolios || []).map(sub => ({ name: sub.name || '', symbols: [...sub.symbols], weights: { ...sub.weights }, cashRate: sub.cashRate || 0, rebalance: sub.rebalance || 'monthly' })), optimizeWeights: sp.optimizeWeights ? { ...sp.optimizeWeights } : { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: sp.optimizeBounds ? JSON.parse(JSON.stringify(sp.optimizeBounds)) : {}, optimizeTotalBounds: sp.optimizeTotalBounds ? [...sp.optimizeTotalBounds] : [0, 100], showOptimizer: sp.showOptimizer || false, excludedSeries: sp.excludedSeries ? [...sp.excludedSeries] : [] };
-                    state.panels.push(panel);
-                    const card = document.createElement('div');
-                    card.className = 'ticker-card';
-                    card.id = `panel-${panel.id}`;
-                    card.draggable = true;
-                    card.dataset.panelId = panel.id;
-                    card.addEventListener('dragstart', onDragStart);
-                    card.addEventListener('dragend', onDragEnd);
-                    card.addEventListener('dragover', onDragOver);
-                    card.addEventListener('dragenter', onDragEnter);
-                    card.addEventListener('dragleave', onDragLeave);
-                    card.addEventListener('drop', onDrop);
-                    if (panel.colSpan > 1) card.style.gridColumn = `span ${panel.colSpan}`;
-                    if (sp.resizeWidth) card.style.width = sp.resizeWidth + 'px';
-                    if (sp.resizeHeight) card.style.height = sp.resizeHeight + 'px';
-
-                    const ro = new ResizeObserver(entries => {
-                        for (const entry of entries) {
-                            const w = entry.contentRect.width;
-                            const cols = getComputedStyle(grid).gridTemplateColumns.split(' ');
-                            const colWidth = parseFloat(cols[0]) || 480;
-                            const gap = parseFloat(getComputedStyle(grid).columnGap) || 0;
-                            const span = Math.max(1, Math.min(cols.length, Math.ceil((w + gap) / (colWidth + gap))));
-                            if (span !== panel.colSpan) {
-                                panel.colSpan = span;
-                                card.style.gridColumn = span > 1 ? `span ${span}` : '';
-                            }
-                            panel.resizeWidth = card.offsetWidth;
-                            panel.resizeHeight = card.offsetHeight;
-                        }
-                    });
-                    ro.observe(card);
-
-                    card.innerHTML = '<div class="loading-overlay"><div class="spinner"></div></div>';
-                    grid.appendChild(card);
-                }
-
-                // Fetch ticker data for symbols not already loaded
                 showStatus('Loading workspace tickers...');
-                const fetches = [...allSyms].filter(sym => !state.rawSeries[sym]).map(async sym => {
-                    try {
-                        state.rawSeries[sym] = await fetchYahooChart(sym);
-                    } catch (e) { console.error(`Failed to load ${sym}:`, e); }
-                });
-                await Promise.all(fetches);
-                // Apply configured backfills once raw series are in (proxies may fetch additional data).
-                await Promise.all([...allSyms].filter(sym => state.rawSeries[sym]).map(sym => applyBackfill(sym)));
-
-                // Render all panels
-                for (const panel of state.panels) {
-                    renderPanelContent(panel);
-                }
+                await applyWorkspace(workspace);
                 showStatus('');
+                resetHistory(); // a freshly loaded workspace starts a new undo timeline
             } catch (e) {
                 showStatus('Failed to load workspace: ' + e.message, true);
                 setTimeout(() => showStatus(''), 5000);
             }
+        }
+
+        // ── Undo / redo (workspace snapshots) ──
+        const undoBtn = document.getElementById('undo-btn');
+        const redoBtn = document.getElementById('redo-btn');
+        const historyStack = [];   // { json, key }
+        let histIndex = -1;        // points at the snapshot currently displayed
+        let isRestoring = false;
+        let recordTimer = null;
+        const MAX_HISTORY = 100;
+
+        // Compare snapshots ignoring purely visual fields, so resizing a card or switching a chart range
+        // doesn't count as an undoable command.
+        function meaningfulKey(ws) {
+            const panels = ws.panels.map(({ chartRange, colSpan, resizeWidth, resizeHeight, ...rest }) => rest);
+            return JSON.stringify({ currency: ws.currency, proxyBackfill: ws.proxyBackfill, panels });
+        }
+
+        function updateUndoRedoButtons() {
+            if (undoBtn) undoBtn.disabled = histIndex <= 0;
+            if (redoBtn) redoBtn.disabled = histIndex >= historyStack.length - 1;
+        }
+
+        function recordSnapshot(force = false) {
+            if (isRestoring) return;
+            const ws = snapshotWorkspace();
+            const key = meaningfulKey(ws);
+            if (!force && histIndex >= 0 && historyStack[histIndex].key === key) return; // nothing changed
+            historyStack.splice(histIndex + 1);           // drop any redo branch
+            historyStack.push({ json: JSON.stringify(ws), key });
+            if (historyStack.length > MAX_HISTORY) historyStack.shift();
+            histIndex = historyStack.length - 1;
+            updateUndoRedoButtons();
+        }
+
+        // Debounced: a single command may fire several DOM events; record once when they settle.
+        function scheduleRecord() {
+            if (isRestoring) return;
+            clearTimeout(recordTimer);
+            recordTimer = setTimeout(() => recordSnapshot(false), 300);
+        }
+
+        function resetHistory() {
+            historyStack.length = 0;
+            histIndex = -1;
+            recordSnapshot(true);
+        }
+
+        async function restoreSnapshot(entry) {
+            isRestoring = true;
+            try { await applyWorkspace(JSON.parse(entry.json)); }
+            finally { isRestoring = false; updateUndoRedoButtons(); }
+        }
+
+        async function undo() {
+            clearTimeout(recordTimer);
+            if (histIndex <= 0) return;
+            histIndex--;
+            await restoreSnapshot(historyStack[histIndex]);
+        }
+
+        async function redo() {
+            clearTimeout(recordTimer);
+            if (histIndex >= historyStack.length - 1) return;
+            histIndex++;
+            await restoreSnapshot(historyStack[histIndex]);
         }
 
         // ── Event listeners ──
@@ -2521,6 +2588,24 @@
         document.getElementById('add-quilt-btn').addEventListener('click', createQuiltPanel);
         saveWsBtn.addEventListener('click', saveWorkspace);
         loadWsBtn.addEventListener('click', loadWorkspace);
+        undoBtn.addEventListener('click', undo);
+        redoBtn.addEventListener('click', redo);
+
+        // Snapshot after any command settles. The debounce + meaningfulKey diff mean only real changes
+        // are recorded, so we don't have to instrument every individual handler.
+        document.addEventListener('change', scheduleRecord, true);
+        document.addEventListener('drop', scheduleRecord, true);
+        document.addEventListener('click', (e) => {
+            if (e.target.closest('#undo-btn, #redo-btn')) return; // undo/redo aren't themselves commands
+            scheduleRecord();
+        }, true);
+        document.addEventListener('keydown', (e) => {
+            if (!(e.ctrlKey || e.metaKey)) return;
+            if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return; // let fields keep native undo
+            const k = e.key.toLowerCase();
+            if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+            else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); redo(); }
+        });
 
         // Grid-level drag handlers for reordering in gaps between cards
         grid.addEventListener('dragover', (e) => {
@@ -2574,6 +2659,7 @@
             }
             await Promise.all(DEFAULT_TICKERS.map(symbol => loadTicker(symbol)));
             showStatus('');
+            resetHistory(); // baseline snapshot for undo/redo
         }
 
         init();
