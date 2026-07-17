@@ -2326,30 +2326,29 @@
         async function loadTicker(symbol) {
             const panel = createPanel([symbol]);
             createPanelCard(panel);
+            // Render whichever panel this became: the one we created (by id), or — if it was merged away
+            // while loading — the first panel now holding the symbol. Keying by id (not symbol) lets the
+            // same ticker live in several panels at once without them rendering into each other.
+            const targetPanel = () => findPanel(panel.id) || findPanelBySymbol(symbol);
             try {
-                const data = await fetchYahooChart(symbol);
-                state.rawSeries[symbol] = data;
-                await applyBackfill(symbol); // sets state.tickerData[symbol] (spliced if a proxy is configured)
-                // Panel may have been merged while loading — find the current panel
-                const currentPanel = findPanelBySymbol(symbol);
-                if (currentPanel) renderPanelContent(currentPanel);
+                if (!state.rawSeries[symbol]) {
+                    state.rawSeries[symbol] = await fetchYahooChart(symbol);
+                    await applyBackfill(symbol); // sets state.tickerData[symbol] (spliced if a proxy is configured)
+                }
+                const current = targetPanel();
+                if (current) renderPanelContent(current);
                 renderQuilts(); // new data may extend or reshape the common-year span
             } catch (e) {
                 console.error(`Error loading ${symbol}:`, e);
-                const currentPanel = findPanelBySymbol(symbol);
-                if (currentPanel) showPanelError(currentPanel.id, `Failed to load ${symbol}: ${e.message}`);
+                const current = targetPanel();
+                if (current) showPanelError(current.id, `Failed to load ${symbol}: ${e.message}`);
             }
         }
 
         function addTicker(symbol) {
             symbol = symbol.trim().toUpperCase();
             if (!symbol) return;
-            if (allSymbols().includes(symbol)) {
-                showStatus(`${symbol} is already displayed`, true);
-                setTimeout(() => showStatus(''), 3000);
-                return;
-            }
-            loadTicker(symbol);
+            loadTicker(symbol); // duplicates are allowed — the same ticker can occupy several panels
             tickerInput.value = '';
         }
 
