@@ -185,6 +185,10 @@
         // ── Configuration ──
         const API_BASE = '/api/chart/';
         const DEFAULT_TICKERS = ['VT', 'VTI', 'VXUS', 'VOO', 'WEBN.DE', 'SPYI.DE', '0P00000LST.ST'];
+        // Default backfill proxies (fund -> proxy), loaded at startup from backfill-defaults.properties
+        // via /api/backfill-defaults so the mapping is config, not code. Applied automatically; still
+        // overridable/clearable per ticker.
+        let defaultBackfill = {};
         const FOREX_PAIRS = {
             'EURUSD': 'EURUSD=X',
             'USDSEK': 'USDSEK=X',
@@ -203,7 +207,7 @@
             tickerData: {},   // symbol -> { timestamps[], adjClose[], currency, name, proxyRealStart?, proxySymbol? }
             rawSeries: {},    // symbol -> original fetched series before any proxy splice
             proxyCache: {},   // proxySymbol -> fetched series (proxies that aren't themselves displayed)
-            proxyBackfill: {},// symbol -> proxy symbol used to estimate history before the fund's inception
+            proxyBackfill: {},// symbol -> proxy symbol used to estimate history before the fund's inception (seeded from defaultBackfill)
             forexData: {},    // pairKey -> { timestamps[], rates[] }
             charts: {},       // panelId -> Chart instance
         };
@@ -2432,7 +2436,8 @@
                 // Set currency and restore backfill proxies before fetching, so splices apply on load.
                 state.currency = workspace.currency || 'USD';
                 currencySelect.value = state.currency;
-                state.proxyBackfill = workspace.proxyBackfill ? { ...workspace.proxyBackfill } : {};
+                // Defaults form the base; a saved workspace's explicit proxies override them.
+                state.proxyBackfill = { ...defaultBackfill, ...(workspace.proxyBackfill || {}) };
 
                 // Collect all unique symbols needed
                 const allSyms = new Set();
@@ -2544,10 +2549,19 @@
             if (!grid.contains(e.relatedTarget)) hideDropIndicator();
         });
 
+        // Load default backfill proxies from the backend (backfill-defaults.properties).
+        async function fetchBackfillDefaults() {
+            try {
+                const resp = await fetch('/api/backfill-defaults', { signal: AbortSignal.timeout(10000) });
+                if (resp.ok) defaultBackfill = await resp.json() || {};
+            } catch (e) { console.warn('Could not load backfill defaults:', e.message); }
+        }
+
         // ── Init ──
         async function init() {
             showStatus('Loading forex rates...');
-            await fetchAllForex();
+            await Promise.all([fetchAllForex(), fetchBackfillDefaults()]);
+            state.proxyBackfill = { ...defaultBackfill }; // seed before tickers load, so splices apply
             const missing = [];
             if (!state.forexData['EURUSD']) missing.push('EUR/USD');
             if (!state.forexData['USDSEK']) missing.push('USD/SEK');
