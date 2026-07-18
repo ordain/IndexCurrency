@@ -23,7 +23,7 @@
         .controls button:disabled { opacity: 0.4; cursor: default; background: #3b82f6; }
         #status-bar { background: #fef3c7; color: #92400e; padding: 0.5rem 2rem; font-size: 0.85rem; display: none; }
         #status-bar.error { background: #fee2e2; color: #991b1b; }
-        main { padding: 1.5rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 1.5rem; align-items: start; }
+        main { padding: 1.5rem; display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: flex-start; }
 
         .ticker-card {
             background: white; border-radius: 8px; padding: 1.2rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
@@ -31,6 +31,7 @@
             border: 2px solid transparent;
             resize: both; overflow: hidden;
             display: flex; flex-direction: column;
+            box-sizing: border-box; flex: 0 0 auto; width: 480px; min-width: 320px; max-width: 100%;
         }
         .ticker-card:active { cursor: grabbing; }
         .ticker-card.dragging { opacity: 0.5; transform: scale(0.97); }
@@ -98,7 +99,7 @@
             background: #3b82f6; border-radius: 2px; display: none;
         }
 
-        @media (max-width: 540px) { main { grid-template-columns: 1fr; padding: 0.8rem; } header { padding: 0.8rem; } }
+        @media (max-width: 540px) { main { padding: 0.8rem; } header { padding: 0.8rem; } .ticker-card { width: 100%; min-width: 0; } }
 
         /* ── Quilt chart (periodic table of returns) ──
            Each series keeps one colour across every year column, so the eye can trace a single
@@ -216,6 +217,7 @@
             charts: {},       // panelId -> Chart instance
         };
         let dragSourcePanelId = null;
+        let suppressChartAnim = false; // set while dragging the cash slider so live redraws don't re-animate
 
         // ── DOM refs ──
         const grid = document.getElementById('tickers-grid');
@@ -840,6 +842,22 @@
             loadedSymbols.forEach((s, i) => { panel.weights[s] = best.weights[i]; });
         }
 
+        // Cards live in a flex-wrap row and are freely resizable (resize: both). Each keeps its own pixel
+        // width; the row packs cards left-to-right and reflows when one is narrowed, with no overlap. We just
+        // restore the saved/default size and record the size back after a drag so it survives save/reload.
+        // colSpan is legacy: for a fresh wide card (e.g. the quilt) it seeds an N-column-equivalent width.
+        const BASE_CARD_WIDTH = 480, CARD_GAP = 24; // 1.5rem gap, matches `main` in CSS
+        function attachCardResize(card, panel) {
+            if (panel.resizeWidth) card.style.width = panel.resizeWidth + 'px';
+            else if (panel.colSpan > 1) card.style.width = (panel.colSpan * BASE_CARD_WIDTH + (panel.colSpan - 1) * CARD_GAP) + 'px';
+            if (panel.resizeHeight) card.style.height = panel.resizeHeight + 'px';
+            const ro = new ResizeObserver(() => {
+                panel.resizeWidth = card.offsetWidth;
+                panel.resizeHeight = card.offsetHeight;
+            });
+            ro.observe(card);
+        }
+
         // ── Panel rendering ──
         function createPanelCard(panel) {
             const card = document.createElement('div');
@@ -856,30 +874,29 @@
             card.addEventListener('dragleave', onDragLeave);
             card.addEventListener('drop', onDrop);
 
-            if (panel.colSpan > 1) card.style.gridColumn = `span ${panel.colSpan}`;
-
-            const ro = new ResizeObserver(entries => {
-                for (const entry of entries) {
-                    const w = entry.contentRect.width;
-                    // Determine single-column width from the grid's resolved columns
-                    const cols = getComputedStyle(grid).gridTemplateColumns.split(' ');
-                    const colWidth = parseFloat(cols[0]) || 480;
-                    const gap = parseFloat(getComputedStyle(grid).columnGap) || 0;
-                    // Calculate how many columns this card should span
-                    const span = Math.max(1, Math.min(cols.length, Math.ceil((w + gap) / (colWidth + gap))));
-                    if (span !== panel.colSpan) {
-                        panel.colSpan = span;
-                        card.style.gridColumn = span > 1 ? `span ${span}` : '';
-                    }
-                    // Track resize dimensions for workspace save
-                    panel.resizeWidth = card.offsetWidth;
-                    panel.resizeHeight = card.offsetHeight;
-                }
-            });
-            ro.observe(card);
+            attachCardResize(card, panel);
 
             grid.appendChild(card);
             renderPanelContent(panel);
+        }
+
+        // Scale the constituent weights so that cash (100 - sum of weights) hits the target, distributing
+        // the freed-up / borrowed money pro rata across the holdings. Lowering cash to -10% on a 75/25 book
+        // pushes the holdings to 82.5/27.5; raising cash shrinks them by the same proportion. When every
+        // holding is at zero there is nothing to scale, so we fall back to an equal split.
+        function setPortfolioCashWeight(panel, targetCash) {
+            const syms = panel.symbols;
+            if (!syms.length) return;
+            const round2 = v => Math.round(v * 100) / 100;
+            const targetAlloc = 100 - targetCash;
+            const currentSum = syms.reduce((s, sym) => s + (panel.weights[sym] || 0), 0);
+            if (Math.abs(currentSum) < 1e-9) {
+                const each = round2(targetAlloc / syms.length);
+                syms.forEach(sym => { panel.weights[sym] = each; });
+            } else {
+                const factor = targetAlloc / currentSum;
+                syms.forEach(sym => { panel.weights[sym] = round2((panel.weights[sym] || 0) * factor); });
+            }
         }
 
         function renderPanelContent(panel) {
@@ -949,6 +966,9 @@
                 if (isPortfolio) {
                     const cashWeight = 100 - totalAlloc;
                     const cashLabel = cashWeight < 0 ? 'Leverage' : 'Cash';
+                    // Slider spans full cash to 2x leverage, but widens if the book already sits outside that band.
+                    const cashSliderMin = Math.min(-100, Math.floor(cashWeight));
+                    const cashSliderMax = Math.max(100, Math.ceil(cashWeight));
                     const weightInputs = panel.symbols.map((sym, i) => {
                         const color = CHART_COLORS[i % CHART_COLORS.length];
                         const w = panel.weights[sym] ?? 0;
@@ -1010,8 +1030,13 @@
                     weightsHTML = `<div style="margin-bottom:0.5rem;font-size:0.82rem;display:flex;flex-wrap:wrap;align-items:center;gap:0.3rem">
                         ${weightInputs}
                     </div>
+                    <div style="margin-bottom:0.5rem;font-size:0.82rem;display:flex;align-items:center;gap:0.6rem">
+                        <span style="white-space:nowrap;font-weight:600">Cash / Leverage</span>
+                        <input type="range" data-cash-slider min="${cashSliderMin}" max="${cashSliderMax}" step="1" value="${cashWeight}"
+                            style="flex:1;min-width:100px;cursor:pointer">
+                        <span style="white-space:nowrap;min-width:96px;text-align:right"><span data-cash-label>${cashLabel}</span>: <strong data-cash-value>${cashWeight.toFixed(0)}%</strong></span>
+                    </div>
                     <div style="margin-bottom:0.5rem;font-size:0.82rem;display:flex;flex-wrap:wrap;align-items:center;gap:0.8rem">
-                        <span>${cashLabel}: <strong>${cashWeight.toFixed(0)}%</strong></span>
                         <span>Rate: <input type="number" step="0.1" value="${panel.cashRate}" data-cash-rate
                             style="width:60px;padding:0.2rem 0.3rem;border:1px solid #d1d5db;border-radius:4px;font-size:0.8rem;text-align:right">%</span>
                         <span>Rebalance: <select data-rebalance style="padding:0.2rem 0.3rem;border:1px solid #d1d5db;border-radius:4px;font-size:0.8rem">${rebalOpts}</select></span>
@@ -1287,6 +1312,36 @@
                     renderPanelContent(panel);
                 });
             }
+            const cashSlider = card.querySelector('[data-cash-slider]');
+            if (cashSlider) {
+                let rafPending = false;
+                cashSlider.addEventListener('input', () => {
+                    suppressChartAnim = true; // live redraws shouldn't re-run the draw animation
+                    const targetCash = parseFloat(cashSlider.value);
+                    setPortfolioCashWeight(panel, targetCash);
+                    // Patch the lightweight bits in place so the drag isn't interrupted by a full re-render.
+                    panel.symbols.forEach(sym => {
+                        const inp = card.querySelector(`[data-weight-sym="${sym}"]`);
+                        if (inp) inp.value = panel.weights[sym];
+                    });
+                    const lblEl = card.querySelector('[data-cash-label]');
+                    if (lblEl) lblEl.textContent = targetCash < 0 ? 'Leverage' : 'Cash';
+                    const valEl = card.querySelector('[data-cash-value]');
+                    if (valEl) valEl.textContent = `${targetCash.toFixed(0)}%`;
+                    const sub = card.querySelector('.subtitle');
+                    if (sub) sub.textContent = `Total allocation: ${100 - targetCash}%`;
+                    // Chart redraws are the heavy part; coalesce them to one per frame.
+                    if (!rafPending) {
+                        rafPending = true;
+                        requestAnimationFrame(() => { rafPending = false; renderPanelChart(panel); });
+                    }
+                });
+                // On release, do a full re-render so the metrics table and slider bounds catch up.
+                cashSlider.addEventListener('change', () => {
+                    renderPanelContent(panel);
+                    suppressChartAnim = false; // restore animation for subsequent normal redraws
+                });
+            }
             const rebalSelect = card.querySelector('[data-rebalance]');
             if (rebalSelect) {
                 rebalSelect.addEventListener('change', (e) => {
@@ -1376,6 +1431,7 @@
 
             const isMulti = panel.symbols.length > 1;
             const cur = state.currency;
+            const chartAnim = suppressChartAnim ? false : undefined; // undefined => Chart.js default animation
 
             if (panel.mode === 'portfolioComparison') {
                 // Portfolio comparison: one line per sub-portfolio
@@ -1408,6 +1464,7 @@
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
+                        animation: chartAnim,
                         interaction: { mode: 'nearest', axis: 'x', intersect: false },
                         plugins: {
                             legend: { display: true, position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
@@ -1461,6 +1518,7 @@
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
+                        animation: chartAnim,
                         interaction: { mode: 'index', intersect: false },
                         plugins: {
                             legend: { display: false },
@@ -1516,6 +1574,7 @@
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
+                        animation: chartAnim,
                         interaction: { mode: 'nearest', axis: 'x', intersect: false },
                         plugins: {
                             legend: { display: true, position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
@@ -1577,6 +1636,7 @@
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
+                        animation: chartAnim,
                         interaction: { mode: 'index', intersect: false },
                         plugins: {
                             legend: { display: false },
@@ -2166,7 +2226,7 @@
                 series.push({ key: 't:' + sym, label: sym, full: (data && data.name) || sym, estBefore: (data && data.proxyRealStart) || 0, ...vs });
             }
             for (const panel of state.panels) {
-                if (panel.mode === 'portfolio' && panel.symbols.length > 1) {
+                if (panel.mode === 'portfolio') {
                     const loaded = panel.symbols.filter(s => state.tickerData[s]);
                     const vs = portfolioValueSeries(loaded, panel.weights, panel.cashRate, currency, panel.rebalance);
                     if (!vs) continue;
@@ -2436,26 +2496,9 @@
                 card.addEventListener('dragenter', onDragEnter);
                 card.addEventListener('dragleave', onDragLeave);
                 card.addEventListener('drop', onDrop);
-                if (panel.colSpan > 1) card.style.gridColumn = `span ${panel.colSpan}`;
-                if (sp.resizeWidth) card.style.width = sp.resizeWidth + 'px';
-                if (sp.resizeHeight) card.style.height = sp.resizeHeight + 'px';
-
-                const ro = new ResizeObserver(entries => {
-                    for (const entry of entries) {
-                        const w = entry.contentRect.width;
-                        const cols = getComputedStyle(grid).gridTemplateColumns.split(' ');
-                        const colWidth = parseFloat(cols[0]) || 480;
-                        const gap = parseFloat(getComputedStyle(grid).columnGap) || 0;
-                        const span = Math.max(1, Math.min(cols.length, Math.ceil((w + gap) / (colWidth + gap))));
-                        if (span !== panel.colSpan) {
-                            panel.colSpan = span;
-                            card.style.gridColumn = span > 1 ? `span ${span}` : '';
-                        }
-                        panel.resizeWidth = card.offsetWidth;
-                        panel.resizeHeight = card.offsetHeight;
-                    }
-                });
-                ro.observe(card);
+                panel.resizeWidth = sp.resizeWidth;
+                panel.resizeHeight = sp.resizeHeight;
+                attachCardResize(card, panel);
 
                 card.innerHTML = '<div class="loading-overlay"><div class="spinner"></div></div>';
                 grid.appendChild(card);
@@ -2590,6 +2633,14 @@
         loadWsBtn.addEventListener('click', loadWorkspace);
         undoBtn.addEventListener('click', undo);
         redoBtn.addEventListener('click', redo);
+
+        // A card is draggable for reorder/merge, but a native drag started anywhere inside it — including on
+        // the cash/leverage slider thumb or a weight field — would drag the whole panel. Toggle draggable off
+        // the moment a gesture begins on an interactive control, so those controls work normally.
+        document.addEventListener('mousedown', (e) => {
+            const card = e.target.closest('.ticker-card');
+            if (card) card.draggable = !e.target.closest('input, select, textarea, button, a');
+        }, true);
 
         // Snapshot after any command settles. The debounce + meaningfulKey diff mean only real changes
         // are recorded, so we don't have to instrument every individual handler.
