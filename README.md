@@ -6,13 +6,14 @@ Iris Bond startade 2017, men jag ville se hur den troligen hade betett sig läng
 
 Captor Iris Bond baseras på investeringar främst i säkerställda bostadsobligationer, men också en del statsobligationer och liknande. Räntederivat (swappar och swaptions) används för att upprätthålla positioner mot svenska räntor med lång löptid.
 
-Fondens avkastning styrs i princip av tre saker:
+Fondens avkastning styrs i princip av tre marknadsfaktorer, plus fondens kostnader:
 
 1. **Ränterörelser** – när räntan på den löptid fonden är exponerad mot faller stiger fonden (och vice versa).
 2. **Covered-spreaden** – hur mycket mer säkerställda (bostads-)obligationer ger än staten.
 3. **Löpande ränta (carry)** – kupongen man får på innehavda obligationer + carry i swapparna.
+4. **Kostnader** – förvaltningsavgift och övriga kostnader (transaktion/administration) drar ner avkastningen med en i stort sett konstant årlig kostnad.
 
-Utöver dessa tre huvudsakliga drivkrafter påverkas avkastningen potentiellt av att fonden också använder swaptions för att hantera durationen: känsligheten för *hur mycket* räntan rör sig (räntevolatilitet), inte bara riktningen. Den är sekundär och fångas bara grovt (se förbehåll).
+Utöver faktorerna ovan påverkas avkastningen av **aktiva förvaltningsbeslut** (se förbehåll) och av att fonden använder **swaptions** för durationen – det senare ger en känslighet för *hur mycket* räntan rör sig (räntevolatilitet), inte bara riktningen, som är sekundär och fångas bara grovt.
 
 Jag mätte hur känslig fondens veckoavkastning är mot var och en av dessa, via en regressionsanalys under fondens livstid (2017 till idag), och applicerade sedan de känsligheterna på **historiska räntedata tillbaka till 1980-talet**.
 
@@ -36,7 +37,7 @@ Eftersom min modell drivs av statsräntan men fonden i verkligheten av swappen, 
 ## Övriga förbehåll
 
 - Fonden är aktivt förvaltad. Aktiva beslut kan förstås orsaka avvikelser från förväntad avkastning.
-- **Kostnader:** avkastningen är netto efter avgifter. Fondens NAV är redan efter kostnader; i simuleringen adderas den kända avgiften tillbaka *före* regressionen (så att interceptet blir fondens residual/alfa, inte avgift) och dras sedan av explicit igen. Totalkostnaden är konfigurerbar – som standard ~0,40 % förvaltning + 0,015 % övrigt ≈ 0,415 %/år (A-klassen) – så olika andelsklasser eller avgiftsnivåer kan simuleras.
+- **Kostnader:** avkastningen är netto efter avgifter. Fondens NAV är redan efter kostnader; i simuleringen adderas den kända avgiften tillbaka *före* regressionen (så att interceptet blir fondens residual/alfa, inte avgift) och dras sedan av explicit igen.
 - Modellen antar **konstant duration** över tiden, men i verkligheten justeras den. De ~9,7 åren är ett snitt och något lägre än fondens mandat (~10–15 år), delvis just på grund av swap-vs-stat-approximationen ovan.
 - En mindre del av innehavet är **statspapper** snarare än säkerställda obligationer. Det är i praktiken oproblematiskt – den delen ligger direkt på statskurvan som jag redan använder som räntefaktor (ingen swap-vs-stat-basis, och per definition ingen covered-spread). Konsekvensen är bara att den skattade covered-spread-känsligheten (~4 år) är ett *portföljsnitt* över blandningen stat + covered, alltså något utspädd mot ett rent covered-innehav – ännu ett skäl att läsa koefficienterna som genomsnitt.
 - Fonden använder även **swaptions** för att upprätthålla durationen. Optioner är icke-linjära och känsliga för **räntevolatilitet** – en exponering modellen inte fångar (den har ingen volatilitetsfaktor). Effekten är störst i krisperioder med volatilitetstoppar, och gör den konstanta durationen till en grövre approximation över olika ränteregimer.
