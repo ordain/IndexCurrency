@@ -69,7 +69,7 @@ public class IrisBondBackfill {
     // real-lage: faktorerna byggs fran Riksbank-serier (procent). Hamta med RiksbankFetcher.
     //   ranta (duration-overlay) = 10y statsobligation
     //   covered-spread           = 5y bostadsobligation - 5y statsobligation
-    static final String PATH_NAV     = "captor_iris_bond_nav.csv"; // ackumulerande NAV
+    static final String PATH_NAV     = System.getProperty("nav", "captor_iris_bond_nav.csv"); // ackumulerande NAV (-Dnav=...)
     static final String PATH_G10     = "stats_10y.csv";            // 10y statsobligation, PROCENT
     static final String PATH_G5      = "stats_5y.csv";             // 5y statsobligation, PROCENT
     static final String PATH_B5      = "bostad_5y.csv";            // 5y bostadsobligation, PROCENT
