@@ -4,13 +4,15 @@ Iris Bond startade 2017, men jag ville se hur den troligen hade betett sig läng
 
 ## Grundidén
 
-Iris avkastning styrs i princip av tre saker:
+Captor Iris Bond baseras på investeringar främst i säkerställda bostadsobligationer, men också en del statsobligationer och liknande. Räntederivat (swappar och swaptions) används för att upprätthålla positioner mot svenska räntor med lång löptid.
+
+Fondens avkastning styrs i princip av tre saker:
 
 1. **Ränterörelser** – när räntan på den löptid fonden är exponerad mot faller stiger fonden (och vice versa).
 2. **Covered-spreaden** – hur mycket mer säkerställda (bostads-)obligationer ger än staten.
 3. **Löpande ränta (carry)** – kupongen man får på innehavda obligationer + carry i swapparna.
 
-Dessa tre är förstaordningsdrivkrafterna – och det modellen faktiskt mäter. Swaptionerna tillför en fjärde, mer svårfångad: känsligheten för *hur mycket* räntan rör sig (räntevolatilitet), inte bara riktningen. Den är sekundär och fångas bara grovt (se förbehåll).
+Utöver dessa tre huvudsakliga drivkrafter påverkas avkastningen potentiellt av att fonden också använder swaptions för att hantera durationen: känsligheten för *hur mycket* räntan rör sig (räntevolatilitet), inte bara riktningen. Den är sekundär och fångas bara grovt (se förbehåll).
 
 Jag mätte hur känslig fondens veckoavkastning är mot var och en av dessa, via en regressionsanalys under fondens livstid (2017 till idag), och applicerade sedan de känsligheterna på **historiska räntedata tillbaka till 1980-talet**.
 
@@ -33,10 +35,10 @@ Eftersom min modell drivs av statsräntan men fonden i verkligheten av swappen, 
 
 ## Övriga förbehåll
 
-- **Före 2006** var svenska bostadsobligationer inte formellt *säkerställda* (lagen kom 2006). Ekonomiskt snarlikt, men juridiskt en annan produkt – den äldsta delen är osäkrare, särskilt i stress.
 - Modellen antar **konstant duration** över tiden; i verkligheten justeras den. De ~9,7 åren är ett snitt och något lägre än fondens mandat (~10–15 år) – delvis just på grund av swap-vs-stat-approximationen ovan.
 - En mindre del av innehavet är **statspapper** snarare än säkerställda obligationer. Det är i praktiken oproblematiskt – den delen ligger direkt på statskurvan som jag redan använder som räntefaktor (ingen swap-vs-stat-basis, och per definition ingen covered-spread). Konsekvensen är bara att den skattade covered-spread-känsligheten (~4 år) är ett *portföljsnitt* över blandningen stat + covered, alltså något utspädd mot ett rent covered-innehav – ännu ett skäl att läsa koefficienterna som genomsnitt.
 - Fonden använder även **swaptions** för att upprätthålla durationen. Optioner är icke-linjära och känsliga för **räntevolatilitet** – en exponering modellen inte fångar (den har ingen volatilitetsfaktor). Effekten är störst i krisperioder med volatilitetstoppar, och gör den konstanta durationen till en grövre approximation över olika ränteregimer.
+- **Före 2006** var svenska bostadsobligationer inte formellt *säkerställda*. Om vi antar att fonden då ändå skulle ha ägt bostadsobligationer så är detta inget större problem för hur väl simuleringen fångar fondens utveckling.
 
 ## Slutsats
 
