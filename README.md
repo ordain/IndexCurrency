@@ -10,6 +10,8 @@ Iris avkastning styrs i princip av tre saker:
 2. **Covered-spreaden** – hur mycket mer säkerställda (bostads-)obligationer ger än staten.
 3. **Löpande ränta (carry)** – kupongen man får på innehavda obligationer + carry i swapparna.
 
+Dessa tre är förstaordningsdrivkrafterna – och det modellen faktiskt mäter. Swaptionerna tillför en fjärde, mer svårfångad: känsligheten för *hur mycket* räntan rör sig (räntevolatilitet), inte bara riktningen. Den är sekundär och fångas bara grovt (se förbehåll).
+
 Jag mätte hur känslig fondens veckoavkastning är mot var och en av dessa, via en regressionsanalys under fondens livstid (2017 till idag), och applicerade sedan de känsligheterna på **historiska räntedata tillbaka till 1980-talet**.
 
 ## Faktorerna
