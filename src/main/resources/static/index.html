@@ -291,6 +291,48 @@
             return d.getTime() / 1000;
         }
 
+        // ── Chart range helpers (fixed months, or dynamic "max"/"maxany") ──
+        // Number of whole months from a timestamp to now, trimmed so monthsAgo(result) lands at or after the
+        // timestamp — keeps portfolio series (which reject cutoffs before a constituent's start) renderable.
+        function monthsSince(ts) {
+            if (ts == null) return 120;
+            const now = new Date(), then = new Date(ts * 1000);
+            let m = (now.getFullYear() - then.getFullYear()) * 12 + (now.getMonth() - then.getMonth());
+            while (m > 1 && monthsAgo(m) < ts) m--;
+            return Math.max(1, m);
+        }
+        function tickerStart(sym) {
+            const d = state.tickerData[sym];
+            return d && d.timestamps.length ? d.timestamps[0] : null;
+        }
+        // A portfolio line only exists once all its constituents do → its start is the latest constituent start.
+        function portfolioStart(symbols) {
+            const starts = symbols.map(tickerStart).filter(t => t != null);
+            return starts.length ? Math.max(...starts) : null;
+        }
+        // Start timestamp of every series drawn in the panel's chart.
+        function chartSeriesStarts(panel) {
+            const loaded = panel.symbols.filter(s => state.tickerData[s]);
+            if (panel.mode === 'portfolioComparison')
+                return panel.subPortfolios.map(sp => portfolioStart(sp.symbols.filter(s => state.tickerData[s]))).filter(t => t != null);
+            if (panel.mode === 'portfolio') { const t = portfolioStart(loaded); return t != null ? [t] : []; }
+            return loaded.map(tickerStart).filter(t => t != null); // comparison / single ticker
+        }
+        function shownSeriesCount(panel) {
+            if (panel.mode === 'portfolioComparison') return panel.subPortfolios.length;
+            if (panel.mode === 'portfolio') return 1;
+            return panel.symbols.filter(s => state.tickerData[s]).length;
+        }
+        // Resolve panel.chartRange to a month count: a number is used as-is; "max" spans the period all series
+        // share (latest start); "maxany" spans the longest any series covers (earliest start).
+        function resolveChartMonths(panel) {
+            const r = panel.chartRange;
+            if (typeof r !== 'string') return r;
+            const starts = chartSeriesStarts(panel);
+            if (!starts.length) return 120;
+            return monthsSince(r === 'maxany' ? Math.min(...starts) : Math.max(...starts));
+        }
+
         function formatPrice(value, currency) {
             if (value == null || isNaN(value)) return 'N/A';
             const symbols = { USD: '$', EUR: '€', SEK: 'kr ', XDR: 'XDR ' };
@@ -923,13 +965,14 @@
                 return results;
             }
 
+            const optMonths = resolveChartMonths(panel);
             function evaluateCandidate(weights) {
                 const wObj = {};
                 loadedSymbols.forEach((s, i) => { wObj[s] = weights[i]; });
-                const perf = calcPortfolioPerformance(loadedSymbols, wObj, panel.cashRate, panel.chartRange, state.currency, panel.rebalance);
-                const vol = calcPortfolioVolatility(loadedSymbols, wObj, panel.cashRate, panel.chartRange, state.currency, panel.rebalance);
-                const sortino = calcPortfolioSortino(loadedSymbols, wObj, panel.cashRate, panel.chartRange, state.currency, panel.rebalance);
-                const upi = calcPortfolioUPI(loadedSymbols, wObj, panel.cashRate, panel.chartRange, state.currency, panel.rebalance);
+                const perf = calcPortfolioPerformance(loadedSymbols, wObj, panel.cashRate, optMonths, state.currency, panel.rebalance);
+                const vol = calcPortfolioVolatility(loadedSymbols, wObj, panel.cashRate, optMonths, state.currency, panel.rebalance);
+                const sortino = calcPortfolioSortino(loadedSymbols, wObj, panel.cashRate, optMonths, state.currency, panel.rebalance);
+                const upi = calcPortfolioUPI(loadedSymbols, wObj, panel.cashRate, optMonths, state.currency, panel.rebalance);
                 if (perf == null || vol == null) return null;
                 return { weights, perf, vol, sortino: sortino ?? 0, upi: upi ?? 0 };
             }
@@ -1380,9 +1423,13 @@
                 : '';
 
             const ranges = [{l:'1M',m:1},{l:'3M',m:3},{l:'6M',m:6},{l:'1Y',m:12},{l:'3Y',m:36},{l:'5Y',m:60},{l:'10Y',m:120}];
+            const showMaxAny = shownSeriesCount(panel) > 1;
+            if (panel.chartRange === 'maxany' && !showMaxAny) panel.chartRange = 'max'; // fell back to one series
             const rangeBtnsHTML = ranges.map(r =>
                 `<button class="range-btn${r.m === panel.chartRange ? ' active' : ''}" data-range="${r.m}">${r.l}</button>`
-            ).join('');
+            ).join('')
+                + `<button class="range-btn${panel.chartRange === 'max' ? ' active' : ''}" data-range="max" title="Longest period all shown series cover">Max</button>`
+                + (showMaxAny ? `<button class="range-btn${panel.chartRange === 'maxany' ? ' active' : ''}" data-range="maxany" title="Longest period any shown series covers">Max for any</button>` : '');
 
             card.innerHTML = `
                 ${headerHTML}
@@ -1470,7 +1517,8 @@
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     if (btn.dataset.range) {
-                        panel.chartRange = parseInt(btn.dataset.range);
+                        const v = btn.dataset.range;
+                        panel.chartRange = (v === 'max' || v === 'maxany') ? v : parseInt(v);
                     }
                     if (btn.dataset.mode) {
                         panel.mode = btn.dataset.mode;
@@ -1625,9 +1673,12 @@
             if (panel.mode === 'portfolioComparison') {
                 // Portfolio comparison: one line per sub-portfolio
                 const subs = panel.subPortfolios;
+                const panelMonths = resolveChartMonths(panel);
                 const datasets = subs.map((sp, i) => {
                     const spSymbols = sp.symbols.filter(s => state.tickerData[s]);
-                    const chartData = getPortfolioChartData(spSymbols, sp.weights, sp.cashRate, cur, panel.chartRange, sp.rebalance);
+                    // "Max for any" lets each sub-portfolio span its own full history; otherwise all share one window.
+                    const months = panel.chartRange === 'maxany' ? monthsSince(portfolioStart(spSymbols)) : panelMonths;
+                    const chartData = getPortfolioChartData(spSymbols, sp.weights, sp.cashRate, cur, months, sp.rebalance);
                     let displayData = chartData;
                     if (chartData.length > 400) {
                         const step = Math.ceil(chartData.length / 400);
@@ -1681,7 +1732,7 @@
                 });
             } else if (panel.mode === 'portfolio') {
                 // Portfolio mode: single combined line (works for one ticker too, e.g. leveraged)
-                const chartData = getPortfolioChartData(loadedSymbols, panel.weights, panel.cashRate, cur, panel.chartRange, panel.rebalance);
+                const chartData = getPortfolioChartData(loadedSymbols, panel.weights, panel.cashRate, cur, resolveChartMonths(panel), panel.rebalance);
                 let displayData = chartData;
                 if (chartData.length > 400) {
                     const step = Math.ceil(chartData.length / 400);
@@ -1735,7 +1786,7 @@
                 });
             } else if (isMulti) {
                 // Normalized multi-ticker chart
-                const normalized = getNormalizedChartData(loadedSymbols, cur, panel.chartRange);
+                const normalized = getNormalizedChartData(loadedSymbols, cur, resolveChartMonths(panel));
                 const datasets = loadedSymbols.map((sym, i) => {
                     const data = normalized[sym] || [];
                     const color = CHART_COLORS[i % CHART_COLORS.length];
@@ -1793,7 +1844,7 @@
                 // Single ticker chart (absolute prices)
                 const sym = loadedSymbols[0];
                 const data = state.tickerData[sym];
-                const threeYearsAgo = monthsAgo(panel.chartRange);
+                const threeYearsAgo = monthsAgo(resolveChartMonths(panel));
                 const chartData = [];
                 for (let i = 0; i < data.timestamps.length; i++) {
                     if (data.timestamps[i] < threeYearsAgo) continue;
