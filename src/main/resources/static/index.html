@@ -108,6 +108,18 @@
         .rf-row label { font-weight: 600; font-size: 0.92rem; color: #374151; }
         .rf-row input { width: 84px; padding: 0.3rem 0.4rem; border: 1px solid #d1d5db; border-radius: 5px; font-size: 0.85rem; text-align: right; margin-right: 0.25rem; }
 
+        .table-wrap { position: relative; }
+        .table-toolbar { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+        .col-add-btn { width: 22px; height: 22px; border: 1px solid #d1d5db; border-radius: 5px; background: #f9fafb; color: #374151; font-size: 1rem; line-height: 1; cursor: pointer; padding: 0; }
+        .col-add-btn:hover { background: #e0e7ff; border-color: #93c5fd; }
+        /* Fixed (not absolute) so the card's overflow:hidden — needed for the resize handle — can't clip it.
+           Its top/left are set in JS from the button's position. */
+        .col-menu { position: fixed; background: white; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,0.2); padding: 0.35rem; z-index: 50; min-width: 150px; max-height: 70vh; overflow-y: auto; }
+        .col-menu-group { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.03em; color: #9ca3af; font-weight: 700; padding: 0.35rem 0.35rem 0.15rem; }
+        .col-menu-item { display: flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0.35rem; font-size: 0.8rem; color: #374151; cursor: pointer; white-space: nowrap; border-radius: 4px; }
+        .col-menu-item:hover { background: #f3f4f6; }
+        .col-menu-item input { cursor: pointer; margin: 0; }
+
         @media (max-width: 540px) { main { padding: 0.8rem; } header { padding: 0.8rem; } .ticker-card { width: 100%; min-width: 0; } }
 
         /* ── Quilt chart (periodic table of returns) ──
@@ -242,6 +254,7 @@
             proxyCache: {},   // proxySymbol -> fetched series (proxies that aren't themselves displayed)
             proxyBackfill: {},// symbol -> proxy symbol used to estimate history before the fund's inception (seeded from defaultBackfill)
             riskFreeRates: {},// currency -> annual % override (empty = use defaultRiskFreeRates); saved in the workspace
+            famaFrench: null, // Map(dateStr 'YYYY-MM-DD' -> { MKT, SMB, HML, RMW, CMA }) daily factor returns, or null
             forexData: {},    // pairKey -> { timestamps[], rates[] }
             charts: {},       // panelId -> Chart instance
         };
@@ -390,22 +403,30 @@
             return ((endPrice - startPrice) / startPrice) * 100;
         }
 
-        function getDailyReturns(data, months, targetCurrency) {
+        // Daily returns with the timestamp of each return's end day, so a series can be date-aligned against
+        // another (e.g. the Fama-French factors). Mirrors getPortfolioDailyReturns' { timestamps, returns }.
+        function getTickerDatedReturns(data, months, targetCurrency) {
             const endIdx = data.timestamps.length - 1;
             if (endIdx < 1) return null;
             const startTs = monthsAgo(months);
             const TOLERANCE = 7 * 86400;
             if (startTs < data.timestamps[0] - TOLERANCE) return null;
             const startIdx = closestIndex(data.timestamps, startTs);
-            const returns = [];
+            const returns = [], timestamps = [];
             for (let i = startIdx + 1; i <= endIdx; i++) {
                 const prev = convertPrice(data.adjClose[i - 1], data.currency, targetCurrency, data.timestamps[i - 1]);
                 const curr = convertPrice(data.adjClose[i], data.currency, targetCurrency, data.timestamps[i]);
                 if (prev != null && curr != null && prev !== 0) {
                     returns.push((curr - prev) / prev);
+                    timestamps.push(data.timestamps[i]);
                 }
             }
-            return returns.length > 1 ? returns : null;
+            return returns.length > 1 ? { timestamps, returns } : null;
+        }
+
+        function getDailyReturns(data, months, targetCurrency) {
+            const dr = getTickerDatedReturns(data, months, targetCurrency);
+            return dr ? dr.returns : null;
         }
 
         function calcVolatility(data, months, targetCurrency) {
@@ -476,26 +497,152 @@
             return (annualizedReturn - riskFreeRate(targetCurrency)) / ulcerIndex;
         }
 
-        function calcCorrelation(dataA, dataB, months, targetCurrency) {
-            const returnsA = getDailyReturns(dataA, months, targetCurrency);
-            const returnsB = getDailyReturns(dataB, months, targetCurrency);
-            if (!returnsA || !returnsB) return null;
-            // Align to same length from the end (most recent dates)
-            const len = Math.min(returnsA.length, returnsB.length);
+        // Pearson correlation of two equal-purpose return arrays, aligned to the shorter one's most recent tail.
+        function pearson(arrA, arrB) {
+            const len = Math.min(arrA.length, arrB.length);
             if (len < 5) return null;
-            const a = returnsA.slice(-len);
-            const b = returnsB.slice(-len);
+            const a = arrA.slice(-len), b = arrB.slice(-len);
             const meanA = a.reduce((s, v) => s + v, 0) / len;
             const meanB = b.reduce((s, v) => s + v, 0) / len;
             let cov = 0, varA = 0, varB = 0;
             for (let i = 0; i < len; i++) {
                 const da = a[i] - meanA, db = b[i] - meanB;
-                cov += da * db;
-                varA += da * da;
-                varB += db * db;
+                cov += da * db; varA += da * da; varB += db * db;
             }
             if (varA === 0 || varB === 0) return null;
             return cov / Math.sqrt(varA * varB);
+        }
+
+        function calcCorrelation(dataA, dataB, months, targetCurrency) {
+            const returnsA = getDailyReturns(dataA, months, targetCurrency);
+            const returnsB = getDailyReturns(dataB, months, targetCurrency);
+            if (!returnsA || !returnsB) return null;
+            return pearson(returnsA, returnsB);
+        }
+
+        // ── Optional metric columns (see COLUMN_DEFS) computed from a { timestamps, returns } series ──
+        function perfFromReturns(dr) {
+            let value = 1;
+            for (const r of dr.returns) value *= (1 + r);
+            return (value - 1) * 100;
+        }
+        function volFromReturns(dr) {
+            const rs = dr.returns;
+            const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
+            const variance = rs.reduce((s, r) => s + (r - mean) ** 2, 0) / (rs.length - 1);
+            return Math.sqrt(variance) * Math.sqrt(252) * 100;
+        }
+        // Sharpe ratio: annualised return in excess of the display-currency risk-free rate, per unit of vol.
+        function sharpeFromReturns(dr, currency) {
+            const rs = dr.returns;
+            const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
+            const variance = rs.reduce((s, r) => s + (r - mean) ** 2, 0) / (rs.length - 1);
+            const sd = Math.sqrt(variance);
+            if (sd === 0) return null;
+            const annualExcess = mean * 252 - riskFreeRate(currency) / 100;
+            return annualExcess / (sd * Math.sqrt(252));
+        }
+        // Excess kurtosis (fat-tailedness) of the daily returns; 0 is normal-like.
+        function kurtosisFromReturns(dr) {
+            const rs = dr.returns;
+            if (rs.length < 4) return null;
+            const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
+            let m2 = 0, m4 = 0;
+            for (const r of rs) { const d = r - mean; m2 += d * d; m4 += d * d * d * d; }
+            m2 /= rs.length; m4 /= rs.length;
+            if (m2 === 0) return null;
+            return m4 / (m2 * m2) - 3;
+        }
+        // Ulcer index: RMS drawdown of the equity curve rebuilt from the returns.
+        function ulcerFromReturns(dr) {
+            let value = 100, peak = 100, sumSqDD = 0, count = 0;
+            for (const r of dr.returns) {
+                value *= (1 + r);
+                if (value > peak) peak = value;
+                const dd = (value - peak) / peak * 100;
+                sumSqDD += dd * dd; count++;
+            }
+            if (count === 0) return null;
+            return Math.sqrt(sumSqDD / (count + 1));
+        }
+        // UPI / Martin ratio: excess annualised return per unit of ulcer.
+        function upiFromReturns(dr, currency) {
+            const ulcer = ulcerFromReturns(dr);
+            if (ulcer == null || ulcer === 0) return null;
+            let value = 100;
+            for (const r of dr.returns) value *= (1 + r);
+            const count = dr.returns.length;
+            const totalReturn = value / 100 - 1;
+            const years = (count + 1) / 252;
+            const annualizedReturn = (Math.pow(1 + totalReturn, 1 / years) - 1) * 100;
+            return (annualizedReturn - riskFreeRate(currency)) / ulcer;
+        }
+        // Correlation of the series' daily returns with a Fama-French factor's daily returns, aligned by date.
+        function factorCorrFromReturns(dr, factorKey) {
+            const ff = state.famaFrench;
+            if (!ff || ff.size === 0 || !dr) return null;
+            const a = [], b = [];
+            for (let i = 0; i < dr.returns.length; i++) {
+                const dateStr = new Date(dr.timestamps[i] * 1000).toISOString().slice(0, 10);
+                const row = ff.get(dateStr);
+                if (row && row[factorKey] != null) { a.push(dr.returns[i]); b.push(row[factorKey]); }
+            }
+            return pearson(a, b);
+        }
+
+        // Registry of optional table columns. Each computes from a { timestamps, returns } series so the same
+        // definition works for a single ticker and a portfolio. ALL_COLUMN_KEYS is the display/menu order.
+        const fmtRatio = v => v === Infinity ? '∞' : v.toFixed(2);
+        const clsPosNeg = v => v >= 0 ? 'positive' : 'negative';
+        const COLUMN_DEFS = {
+            perf:     { label: 'Return',     compute: (dr, c) => perfFromReturns(dr),               fmt: v => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`, cls: clsPosNeg },
+            vol:      { label: 'Volatility', compute: (dr, c) => volFromReturns(dr),                fmt: v => `${v.toFixed(2)}%`, cls: () => '' },
+            sortino:  { label: 'Sortino',    compute: (dr, c) => sortinoFromReturns(dr.returns, c), fmt: fmtRatio, cls: clsPosNeg },
+            upi:      { label: 'UPI',        compute: (dr, c) => upiFromReturns(dr, c),             fmt: fmtRatio, cls: clsPosNeg },
+            sharpe:   { label: 'Sharpe',     compute: (dr, c) => sharpeFromReturns(dr, c),          fmt: fmtRatio, cls: clsPosNeg },
+            ulcer:    { label: 'Ulcer',      compute: (dr, c) => ulcerFromReturns(dr),              fmt: v => v.toFixed(2), cls: () => '' },
+            kurtosis: { label: 'Kurtosis',   compute: (dr, c) => kurtosisFromReturns(dr),           fmt: v => v.toFixed(2), cls: () => '' },
+            ff_mkt:   { label: 'Mkt-RF',     compute: (dr, c) => factorCorrFromReturns(dr, 'MKT'),  fmt: v => v.toFixed(2), cls: () => '' },
+            ff_smb:   { label: 'SMB',        compute: (dr, c) => factorCorrFromReturns(dr, 'SMB'),  fmt: v => v.toFixed(2), cls: () => '' },
+            ff_hml:   { label: 'HML',        compute: (dr, c) => factorCorrFromReturns(dr, 'HML'),  fmt: v => v.toFixed(2), cls: () => '' },
+            ff_rmw:   { label: 'RMW',        compute: (dr, c) => factorCorrFromReturns(dr, 'RMW'),  fmt: v => v.toFixed(2), cls: () => '' },
+            ff_cma:   { label: 'CMA',        compute: (dr, c) => factorCorrFromReturns(dr, 'CMA'),  fmt: v => v.toFixed(2), cls: () => '' },
+        };
+        const ALL_COLUMN_KEYS = ['perf', 'vol', 'sortino', 'upi', 'sharpe', 'ulcer', 'kurtosis', 'ff_mkt', 'ff_smb', 'ff_hml', 'ff_rmw', 'ff_cma'];
+        const DEFAULT_COLUMNS = ['perf', 'vol', 'sortino', 'upi'];
+        // Group headers shown in the column menu, keyed by the column the group starts at.
+        const COLUMN_GROUP_LABELS = { sharpe: 'Risk metrics', ff_mkt: 'Factor correlation (FF5)' };
+
+        // A table's currently enabled columns, in canonical order.
+        function enabledColumns(panel) {
+            const cols = panel.columns || DEFAULT_COLUMNS;
+            return ALL_COLUMN_KEYS.filter(k => cols.includes(k));
+        }
+        function metricHeaderCells(cols) {
+            return cols.map(k => `<th>${COLUMN_DEFS[k].label}</th>`).join('');
+        }
+        // One <td> per enabled column for a { timestamps, returns } series (null = insufficient history).
+        function metricValueCells(cols, dr, currency) {
+            return cols.map(k => {
+                const def = COLUMN_DEFS[k];
+                const val = dr ? def.compute(dr, currency) : null;
+                if (val == null || (typeof val === 'number' && isNaN(val))) return `<td class="na">N/A</td>`;
+                return `<td class="${def.cls(val)}">${def.fmt(val)}</td>`;
+            }).join('');
+        }
+        // Wrap a metrics table with the "+" column picker (button top-right, dropdown menu below it).
+        function wrapTableWithColMenu(panel, tableHTML) {
+            if (!tableHTML) return '';
+            const menu = panel._colMenuOpen ? `<div class="col-menu">${ALL_COLUMN_KEYS.map(k => {
+                const grp = COLUMN_GROUP_LABELS[k] ? `<div class="col-menu-group">${COLUMN_GROUP_LABELS[k]}</div>` : '';
+                const checked = (panel.columns || DEFAULT_COLUMNS).includes(k) ? ' checked' : '';
+                return `${grp}<label class="col-menu-item"><input type="checkbox" data-col-toggle="${k}"${checked}>${COLUMN_DEFS[k].label}</label>`;
+            }).join('')}</div>` : '';
+            return `<div class="table-wrap">
+                <div class="table-toolbar"><button class="col-add-btn" data-col-menu title="Add or remove columns">+</button></div>
+                ${menu}
+                ${tableHTML}
+            </div>`;
         }
 
         // ── Portfolio calculation functions ──
@@ -1155,81 +1302,54 @@
                 { label: '10 Year', months: 120 },
             ];
 
-            const metrics = [
-                { key: 'perf', label: 'Return', fn: calcPerformance, fmt: v => { const s = v >= 0 ? '+' : ''; return `${s}${v.toFixed(2)}%`; }, cls: v => v >= 0 ? 'positive' : 'negative' },
-                { key: 'vol', label: 'Volatility', fn: calcVolatility, fmt: v => `${v.toFixed(2)}%`, cls: () => '' },
-                { key: 'sortino', label: 'Sortino', fn: calcSortino, fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
-                { key: 'upi', label: 'UPI', fn: calcUPI, fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
-            ];
+            const cols = enabledColumns(panel);
+            const cur = state.currency;
+            const headerCols = metricHeaderCells(cols);
 
             let tableHTML;
             if (isPortfolioComparison) {
                 // Portfolio comparison table: metrics as columns, one row per (period, sub-portfolio)
                 const subs = panel.subPortfolios;
-                const subMetrics = [
-                    { label: 'Return', fn: (sp, m) => calcPortfolioPerformance(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => { const s = v >= 0 ? '+' : ''; return `${s}${v.toFixed(2)}%`; }, cls: v => v >= 0 ? 'positive' : 'negative' },
-                    { label: 'Vol', fn: (sp, m) => calcPortfolioVolatility(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => `${v.toFixed(2)}%`, cls: () => '' },
-                    { label: 'Sortino', fn: (sp, m) => calcPortfolioSortino(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
-                    { label: 'UPI', fn: (sp, m) => calcPortfolioUPI(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, m, state.currency, sp.rebalance), fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
-                ];
-                const metricCols = subMetrics.map(m => `<th>${m.label}</th>`).join('');
                 const rows = [];
                 for (const p of periods) {
                     subs.forEach((sp, i) => {
                         const color = CHART_COLORS[i % CHART_COLORS.length];
                         const periodCell = i === 0 ? `<td rowspan="${subs.length}" style="vertical-align:middle">${p.label}</td>` : '';
-                        const cells = subMetrics.map(m => {
-                            const val = m.fn(sp, p.months);
-                            if (val == null) return `<td class="na">N/A</td>`;
-                            return `<td class="${m.cls(val)}">${m.fmt(val)}</td>`;
-                        }).join('');
+                        const dr = getPortfolioDailyReturns(sp.symbols.filter(s => state.tickerData[s]), sp.weights, sp.cashRate, p.months, cur, sp.rebalance);
+                        const cells = metricValueCells(cols, dr, cur);
                         rows.push(`<tr>${periodCell}<td style="color:${color};font-weight:600;font-size:0.75rem">${sp.name || 'Portfolio'}</td>${cells}</tr>`);
                     });
                 }
                 tableHTML = `<table class="perf-table">
-                    <thead><tr><th>Period</th><th></th>${metricCols}</tr></thead>
+                    <thead><tr><th>Period</th><th></th>${headerCols}</tr></thead>
                     <tbody>${rows.join('')}</tbody>
                 </table>`;
             } else if (isPortfolio) {
                 // Portfolio mode: single-ticker layout with combined portfolio stats
-                const portfolioMetrics = [
-                    { key: 'perf', label: 'Return', fn: (m) => calcPortfolioPerformance(loadedSymbols, panel.weights, panel.cashRate, m, state.currency, panel.rebalance), fmt: v => { const s = v >= 0 ? '+' : ''; return `${s}${v.toFixed(2)}%`; }, cls: v => v >= 0 ? 'positive' : 'negative' },
-                    { key: 'vol', label: 'Volatility', fn: (m) => calcPortfolioVolatility(loadedSymbols, panel.weights, panel.cashRate, m, state.currency, panel.rebalance), fmt: v => `${v.toFixed(2)}%`, cls: () => '' },
-                    { key: 'sortino', label: 'Sortino', fn: (m) => calcPortfolioSortino(loadedSymbols, panel.weights, panel.cashRate, m, state.currency, panel.rebalance), fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
-                    { key: 'upi', label: 'UPI', fn: (m) => calcPortfolioUPI(loadedSymbols, panel.weights, panel.cashRate, m, state.currency, panel.rebalance), fmt: v => v === Infinity ? '∞' : v.toFixed(2), cls: v => v >= 0 ? 'positive' : 'negative' },
-                ];
-                const thCols = portfolioMetrics.map(m => `<th>${m.label}</th>`).join('');
                 const rows = periods.map(p => {
-                    const cells = portfolioMetrics.map(m => {
-                        const val = m.fn(p.months);
-                        if (val == null) return `<td class="na">N/A</td>`;
-                        return `<td class="${m.cls(val)}">${m.fmt(val)}</td>`;
-                    }).join('');
-                    return `<tr><td>${p.label}</td>${cells}</tr>`;
+                    const dr = getPortfolioDailyReturns(loadedSymbols, panel.weights, panel.cashRate, p.months, cur, panel.rebalance);
+                    return `<tr><td>${p.label}</td>${metricValueCells(cols, dr, cur)}</tr>`;
                 }).join('');
                 tableHTML = `<table class="perf-table">
-                    <thead><tr><th>Period</th>${thCols}</tr></thead>
+                    <thead><tr><th>Period</th>${headerCols}</tr></thead>
                     <tbody>${rows}</tbody>
                 </table>`;
             } else if (isMulti) {
                 const hasCorr = loadedSymbols.length > 1;
                 const refData = state.tickerData[loadedSymbols[0]];
-                const metricCols = [...metrics.map(m => `<th>${m.label}</th>`), ...(hasCorr ? [`<th>Corr(${loadedSymbols[0]})</th>`] : [])].join('');
+                const metricCols = headerCols + (hasCorr ? `<th>Corr(${loadedSymbols[0]})</th>` : '');
                 const rows = [];
                 for (const p of periods) {
                     loadedSymbols.forEach((sym, i) => {
                         const color = CHART_COLORS[i % CHART_COLORS.length];
                         const periodCell = i === 0 ? `<td rowspan="${loadedSymbols.length}" style="vertical-align:middle">${p.label}</td>` : '';
-                        const cells = metrics.map(m => {
-                            const val = m.fn(state.tickerData[sym], p.months, state.currency);
-                            if (val == null) return `<td class="na">N/A</td>`;
-                            return `<td class="${m.cls(val)}">${m.fmt(val)}</td>`;
-                        }).join('');
+                        const dr = getTickerDatedReturns(state.tickerData[sym], p.months, cur);
+                        const cells = metricValueCells(cols, dr, cur);
                         let corrCell = '';
                         if (hasCorr) {
                             if (i === 0) { corrCell = `<td style="color:#6b7280">—</td>`; }
                             else {
-                                const val = calcCorrelation(refData, state.tickerData[sym], p.months, state.currency);
+                                const val = calcCorrelation(refData, state.tickerData[sym], p.months, cur);
                                 corrCell = val == null ? `<td class="na">N/A</td>` : `<td>${val.toFixed(2)}</td>`;
                             }
                         }
@@ -1242,22 +1362,18 @@
                 </table>`;
             } else if (loadedSymbols.length === 1) {
                 const data = state.tickerData[loadedSymbols[0]];
-                const thCols = metrics.map(m => `<th>${m.label}</th>`).join('');
                 const rows = periods.map(p => {
-                    const cells = metrics.map(m => {
-                        const val = m.fn(data, p.months, state.currency);
-                        if (val == null) return `<td class="na">N/A</td>`;
-                        return `<td class="${m.cls(val)}">${m.fmt(val)}</td>`;
-                    }).join('');
-                    return `<tr><td>${p.label}</td>${cells}</tr>`;
+                    const dr = getTickerDatedReturns(data, p.months, cur);
+                    return `<tr><td>${p.label}</td>${metricValueCells(cols, dr, cur)}</tr>`;
                 }).join('');
                 tableHTML = `<table class="perf-table">
-                    <thead><tr><th>Period</th>${thCols}</tr></thead>
+                    <thead><tr><th>Period</th>${headerCols}</tr></thead>
                     <tbody>${rows}</tbody>
                 </table>`;
             } else {
                 tableHTML = '';
             }
+            tableHTML = wrapTableWithColMenu(panel, tableHTML);
 
             const loadingHTML = pendingSymbols.length > 0
                 ? `<div class="loading-overlay"><div class="spinner"></div></div>`
@@ -1289,6 +1405,37 @@
                     }
                 });
             });
+
+            // Column picker ("+" button and its checklist)
+            const colAddBtn = card.querySelector('[data-col-menu]');
+            if (colAddBtn) {
+                colAddBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    panel._colMenuOpen = !panel._colMenuOpen;
+                    renderPanelContent(panel);
+                });
+            }
+            card.querySelectorAll('[data-col-toggle]').forEach(cb => {
+                cb.addEventListener('change', (e) => {
+                    e.stopPropagation();
+                    const k = cb.dataset.colToggle;
+                    const cols = (panel.columns || DEFAULT_COLUMNS).slice();
+                    if (cb.checked) { if (!cols.includes(k)) cols.push(k); }
+                    else { const idx = cols.indexOf(k); if (idx >= 0) cols.splice(idx, 1); }
+                    panel.columns = cols;
+                    renderPanelContent(panel); // _colMenuOpen stays true, so the menu remains open
+                });
+            });
+            // Anchor the (fixed-position) column menu under its button and keep it on-screen.
+            if (panel._colMenuOpen) {
+                const menuEl = card.querySelector('.col-menu');
+                if (menuEl && colAddBtn) {
+                    const r = colAddBtn.getBoundingClientRect();
+                    const mw = menuEl.offsetWidth, mh = menuEl.offsetHeight;
+                    menuEl.style.left = Math.max(4, Math.min(r.right - mw, window.innerWidth - mw - 4)) + 'px';
+                    menuEl.style.top = (r.bottom + 4 + mh > window.innerHeight ? Math.max(4, r.top - mh - 4) : r.bottom + 4) + 'px';
+                }
+            }
 
             // Portfolio name input
             const nameInput = card.querySelector('[data-portfolio-name]');
@@ -1882,7 +2029,7 @@
 
         // ── Panel management ──
         function createPanel(symbols) {
-            const panel = { id: nextPanelId++, symbols: [...symbols], chartRange: 36, colSpan: 1, mode: 'comparison', weights: {}, cashRate: 0, rebalance: 'monthly', name: '', subPortfolios: [], optimizeWeights: { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: {}, optimizeTotalBounds: [0, 100], showOptimizer: false };
+            const panel = { id: nextPanelId++, symbols: [...symbols], chartRange: 36, colSpan: 1, mode: 'comparison', weights: {}, cashRate: 0, rebalance: 'monthly', name: '', subPortfolios: [], optimizeWeights: { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: {}, optimizeTotalBounds: [0, 100], showOptimizer: false, columns: [...DEFAULT_COLUMNS] };
             state.panels.push(panel);
             return panel;
         }
@@ -2534,6 +2681,7 @@
                     optimizeTotalBounds: [...panel.optimizeTotalBounds],
                     showOptimizer: panel.showOptimizer,
                     excludedSeries: [...(panel.excludedSeries || [])],
+                    columns: [...(panel.columns || DEFAULT_COLUMNS)],
                 });
             });
             return { currency: state.currency, panels: panelsInOrder, proxyBackfill: { ...state.proxyBackfill }, riskFreeRates: { ...state.riskFreeRates } };
@@ -2559,7 +2707,7 @@
             }
 
             for (const sp of ws.panels) {
-                const panel = { id: nextPanelId++, symbols: [...sp.symbols], chartRange: sp.chartRange || 36, colSpan: sp.colSpan || 1, mode: sp.mode || 'comparison', weights: sp.weights ? { ...sp.weights } : {}, cashRate: sp.cashRate || 0, rebalance: sp.rebalance || 'monthly', name: sp.name || '', subPortfolios: (sp.subPortfolios || []).map(sub => ({ name: sub.name || '', symbols: [...sub.symbols], weights: { ...sub.weights }, cashRate: sub.cashRate || 0, rebalance: sub.rebalance || 'monthly' })), optimizeWeights: sp.optimizeWeights ? { ...sp.optimizeWeights } : { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: sp.optimizeBounds ? JSON.parse(JSON.stringify(sp.optimizeBounds)) : {}, optimizeTotalBounds: sp.optimizeTotalBounds ? [...sp.optimizeTotalBounds] : [0, 100], showOptimizer: sp.showOptimizer || false, excludedSeries: sp.excludedSeries ? [...sp.excludedSeries] : [] };
+                const panel = { id: nextPanelId++, symbols: [...sp.symbols], chartRange: sp.chartRange || 36, colSpan: sp.colSpan || 1, mode: sp.mode || 'comparison', weights: sp.weights ? { ...sp.weights } : {}, cashRate: sp.cashRate || 0, rebalance: sp.rebalance || 'monthly', name: sp.name || '', subPortfolios: (sp.subPortfolios || []).map(sub => ({ name: sub.name || '', symbols: [...sub.symbols], weights: { ...sub.weights }, cashRate: sub.cashRate || 0, rebalance: sub.rebalance || 'monthly' })), optimizeWeights: sp.optimizeWeights ? { ...sp.optimizeWeights } : { perf: 75, vol: 0, sortino: 25, upi: 0 }, optimizeBounds: sp.optimizeBounds ? JSON.parse(JSON.stringify(sp.optimizeBounds)) : {}, optimizeTotalBounds: sp.optimizeTotalBounds ? [...sp.optimizeTotalBounds] : [0, 100], showOptimizer: sp.showOptimizer || false, excludedSeries: sp.excludedSeries ? [...sp.excludedSeries] : [], columns: sp.columns ? [...sp.columns] : [...DEFAULT_COLUMNS] };
                 state.panels.push(panel);
                 const card = document.createElement('div');
                 card.className = 'ticker-card';
@@ -2646,7 +2794,7 @@
         // Compare snapshots ignoring purely visual fields, so resizing a card or switching a chart range
         // doesn't count as an undoable command.
         function meaningfulKey(ws) {
-            const panels = ws.panels.map(({ chartRange, colSpan, resizeWidth, resizeHeight, ...rest }) => rest);
+            const panels = ws.panels.map(({ chartRange, colSpan, resizeWidth, resizeHeight, columns, ...rest }) => rest);
             return JSON.stringify({ currency: ws.currency, proxyBackfill: ws.proxyBackfill, riskFreeRates: ws.riskFreeRates, panels });
         }
 
@@ -2718,6 +2866,14 @@
             if (card) card.draggable = !e.target.closest('input, select, textarea, button, a');
         }, true);
 
+        // Close any open column picker when clicking outside it (its own button/menu handle their own clicks).
+        document.addEventListener('click', (e) => {
+            if (e.target.closest('.col-menu') || e.target.closest('[data-col-menu]')) return;
+            for (const panel of state.panels) {
+                if (panel._colMenuOpen) { panel._colMenuOpen = false; renderPanelContent(panel); }
+            }
+        });
+
         // Snapshot after any command settles. The debounce + meaningfulKey diff mean only real changes
         // are recorded, so we don't have to instrument every individual handler.
         document.addEventListener('change', scheduleRecord, true);
@@ -2779,6 +2935,23 @@
             } catch (e) { console.warn('Could not load risk-free rates:', e.message); }
         }
 
+        // Load daily Fama-French 5-factor returns and index them by date for factor-correlation columns.
+        async function fetchFamaFrench() {
+            try {
+                const resp = await fetch('/api/fama-french', { signal: AbortSignal.timeout(30000) });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const dates = data.dates || [];
+                const f = data.factors || {};
+                if (!dates.length) return;
+                const map = new Map();
+                for (let i = 0; i < dates.length; i++) {
+                    map.set(dates[i], { MKT: f.MKT?.[i], SMB: f.SMB?.[i], HML: f.HML?.[i], RMW: f.RMW?.[i], CMA: f.CMA?.[i] });
+                }
+                state.famaFrench = map;
+            } catch (e) { console.warn('Could not load Fama-French factors:', e.message); }
+        }
+
         // ── Init ──
         async function init() {
             showStatus('Loading forex rates...');
@@ -2792,6 +2965,9 @@
             } else {
                 showStatus('Loading tickers...');
             }
+            // Fama-French factors load in the background (first fetch downloads a few MB server-side); when
+            // ready, re-render so any enabled factor-correlation columns fill in.
+            fetchFamaFrench().then(() => { if (state.famaFrench) rerenderAllPanels(); });
             await Promise.all(DEFAULT_TICKERS.map(symbol => loadTicker(symbol)));
             showStatus('');
             resetHistory(); // baseline snapshot for undo/redo
