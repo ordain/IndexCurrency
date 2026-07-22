@@ -33,7 +33,8 @@ Eftersom min modell drivs av statsräntan men fonden i verkligheten av swappen, 
 
 - **Före 2006** var svenska bostadsobligationer inte formellt *säkerställda* (lagen kom 2006). Ekonomiskt snarlikt, men juridiskt en annan produkt – den äldsta delen är osäkrare, särskilt i stress.
 - Modellen antar **konstant duration** över tiden; i verkligheten justeras den. De ~9,7 åren är ett snitt och något lägre än fondens mandat (~10–15 år) – delvis just på grund av swap-vs-stat-approximationen ovan.
-- Fonden använder även **swaptioner** för att upprätthålla durationen. Optioner är icke-linjära och känsliga för **räntevolatilitet** – en exponering modellen inte fångar (den har ingen volatilitetsfaktor). Effekten är störst i krisperioder med volatilitetstoppar, och gör den konstanta durationen till en grövre approximation över olika ränteregimer.
+- En mindre del av innehavet är **statspapper** snarare än säkerställda obligationer. Det är i praktiken oproblematiskt – den delen ligger direkt på statskurvan som jag redan använder som räntefaktor (ingen swap-vs-stat-basis, och per definition ingen covered-spread). Konsekvensen är bara att den skattade covered-spread-känsligheten (~4 år) är ett *portföljsnitt* över blandningen stat + covered, alltså något utspädd mot ett rent covered-innehav – ännu ett skäl att läsa koefficienterna som genomsnitt.
+- Fonden använder även **swaptions** för att upprätthålla durationen. Optioner är icke-linjära och känsliga för **räntevolatilitet** – en exponering modellen inte fångar (den har ingen volatilitetsfaktor). Effekten är störst i krisperioder med volatilitetstoppar, och gör den konstanta durationen till en grövre approximation över olika ränteregimer.
 
 ## Slutsats
 
