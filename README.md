@@ -1,6 +1,6 @@
 # Så simulerade jag Captor Iris Bonds avkastning *före* fonden fanns
 
-Iris Bond startade 2017, men jag ville se hur den troligen hade betett sig längre tillbaka – inte minst genom finanskrisen och räntefallet dessförinnan. Problemet: ingen vanlig räntefond liknar Iris. Den har extremt lång ränterisk (duration ~10–15 år) via ränteswappar ovanpå ett ben av svenska säkerställda obligationer, så man kan inte bara låna historiken från en befintlig fond. Istället byggde jag en **modell** av vad som driver fondens avkastning och extrapolerade bakåt. Så här gick det till.
+Iris Bond startade 2017, men jag ville se hur den troligen hade betett sig längre tillbaka – inte minst genom finanskrisen och räntefallet dessförinnan. Problemet: ingen vanlig räntefond liknar Iris. Den har extremt lång ränterisk (duration ~10–15 år) via ränteswappar ovanpå ett ben av svenska säkerställda obligationer, så man kan inte bara låna historiken från en befintlig fond. Istället byggde jag med hjälp av Claude en **modell** av vad som driver fondens avkastning och extrapolerade bakåt. Så här gick det till.
 
 ## Grundidén
 
@@ -13,9 +13,9 @@ Fondens avkastning styrs i princip av tre marknadsfaktorer, plus fondens kostnad
 3. **Löpande ränta (carry)** – kupongen man får på innehavda obligationer + carry i swapparna.
 4. **Kostnader** – förvaltningsavgift och övriga kostnader (transaktion/administration) drar ner avkastningen med en i stort sett konstant årlig kostnad.
 
-Utöver faktorerna ovan påverkas avkastningen av **aktiva förvaltningsbeslut** (se förbehåll) och av att fonden använder **swaptions** för durationen – det senare ger en känslighet för *hur mycket* räntan rör sig (räntevolatilitet), inte bara riktningen, som är sekundär och fångas bara grovt.
+Utöver faktorerna ovan påverkas avkastningen av **aktiva förvaltningsbeslut** (se förbehåll) och av att fonden använder **swaptions** för att hantera durationen – det senare ger en känslighet för *hur mycket* räntan rör sig (räntevolatilitet), inte bara riktningen, en sekundär effekt som modellen inte fångar.
 
-Jag mätte hur känslig fondens veckoavkastning är mot var och en av dessa, via en regressionsanalys under fondens livstid (2017 till idag), och applicerade sedan de känsligheterna på **historiska räntedata tillbaka till 1980-talet**.
+Jag mätte hur känslig fondens veckoavkastning är mot var och en av de tre marknadsfaktorerna, via en regressionsanalys under fondens livstid (2017 till idag), och applicerade sedan de känsligheterna på **historiska räntedata tillbaka till 1980-talet**.
 
 ## Faktorerna
 
@@ -46,3 +46,7 @@ Eftersom min modell drivs av statsräntan men fonden i verkligheten av swappen, 
 ## Slutsats
 
 Resultatet är en sammanhängande, simulerad totalavkastning för Iris Bond från 1987, byggd på svenska stats- och bostadsräntor. Den fångar det stora draget – det långa räntefallet och hur en långduration-fond gynnas av det – men ska ses som en **kvalificerad uppskattning**, med störst osäkerhet just i kris- och regimskiftesperioder.
+
+@captorfonder Har ni någon kommentar om detta? Har ni någon bättre historisk simulering ni kan dela med er av?
+
+CSV med de simulerade värdena för Captor Iris Bond A och Captor Iris Bond B finner ni här: <Länk kommer läggas till>  
