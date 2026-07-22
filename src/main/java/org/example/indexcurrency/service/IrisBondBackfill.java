@@ -46,9 +46,21 @@ public class IrisBondBackfill {
     //  KONFIG
     // ---------------------------------------------------------------- //
     static final String MODE       = System.getProperty("mode", "real"); // "demo"/"real" (-Dmode=demo)
-    static final double FEE_ANNUAL = 0.0030;     // ca-avgift (fangas av interceptet)
     static final double TARGET_DUR = 11.0;       // realiserad mod. duration ~11 (mandat 10-15y); sanity-check
     static final int    HAC_LAGS   = 4;          // Newey-West Bartlett-lags
+
+    // ── Kostnader (arsvis, som andel) ─────────────────────────────────────────
+    // Forvaltningsavgift for andelsklassen som simuleras + ovriga kostnader (transaktion/administration).
+    // Overrida vid korning: -Dfee=0.004 -Dother=0.00015
+    static final double MGMT_FEE_ANNUAL    = Double.parseDouble(System.getProperty("fee",   "0.0040"));  // 0,40 %
+    static final double OTHER_COSTS_ANNUAL = Double.parseDouble(System.getProperty("other", "0.00015")); // 0,015 %
+    static final double SIM_COST_ANNUAL    = MGMT_FEE_ANNUAL + OTHER_COSTS_ANNUAL; // total kostnad pa simulerad serie
+    // Kostnaden som redan ligger i NAV-serien vi skattar pa. Adderas tillbaka fore regressionen sa att
+    // interceptet blir ren residual/alfa (inte avgift+alfa), och dras sedan av igen (SIM) i simuleringen.
+    // Default = SIM: vi antar att NAV:n ar samma andelsklass som simuleras -> ingen omavgiftning, bara rent
+    // intercept. For att simulera en ANNAN avgift an fonden faktiskt tog: satt -Dnavcost till fondens
+    // verkliga totalkostnad och -Dfee till den hypotetiska.
+    static final double NAV_COST_ANNUAL    = Double.parseDouble(System.getProperty("navcost", String.valueOf(SIM_COST_ANNUAL)));
 
     // Dela upp rantan i 5y- och 10y-nyckelrater (summerar key-rate-durationer -> mindre attenuering)?
     // Styr vid korning: -Dkeyrate=false ger enfaktormodellen (bara 10y). Default: pa.
@@ -154,7 +166,7 @@ public class IrisBondBackfill {
         for (int i = 1; i < n; i++) {
             int j = i - 1;
             p.dates.add(keys.get(i));
-            p.r[j]     = navv[i] / navv[i - 1] - 1.0;
+            p.r[j]     = navv[i] / navv[i - 1] - 1.0 + NAV_COST_ANNUAL / 52.0;   // addera tillbaka NAV:ns kostnad -> brutto
             p.dswap[j] = (g10v[i] - g10v[i - 1]) / 100.0;
             p.dg5[j]   = (g5v[i]  - g5v[i - 1])  / 100.0;
             p.dspr[j]  = (spv[i]  - spv[i - 1])  / 100.0;
@@ -419,7 +431,7 @@ public class IrisBondBackfill {
             double p0 = sp.get(keys.get(i-1)), p1 = sp.get(keys.get(i));
             double dg10 = (s1 - s0) / 100.0, dg5 = (f1 - f0) / 100.0, dspr = (p1 - p0) / 100.0;
             double carry = (s0 + p0) / 100.0 / 52.0, conv = 0.5 * dg10 * dg10;
-            double rhat = rHat(b, dg5, dg10, dspr, carry, conv, 1.0);
+            double rhat = rHat(b, dg5, dg10, dspr, carry, conv, 1.0) - SIM_COST_ANNUAL / 52.0;
             idx *= (1 + rhat);
             pretty.add(String.format("%s  r_hat=%+.4f  index=%.4f", keys.get(i), rhat, idx));
             csv.add(keys.get(i) + "," + String.format(java.util.Locale.US, "%.6f", idx));
@@ -466,7 +478,8 @@ public class IrisBondBackfill {
             double p0 = spread.get(keys.get(i-1)), p1 = spread.get(keys.get(i));
             double dg10 = (s1 - s0) / 100.0, dg5 = (f1 - f0) / 100.0, dspr = (p1 - p0) / 100.0;
             double carry = (s0 + p0) / 100.0 / 252.0, conv = 0.5 * dg10 * dg10;
-            double rhat = rHat(b, dg5, dg10, dspr, carry, conv, 52.0 / 252.0);   // daglig: skala interceptet
+            double rhat = rHat(b, dg5, dg10, dspr, carry, conv, 52.0 / 252.0)    // daglig: skala interceptet
+                    - SIM_COST_ANNUAL / 252.0;                                  // dra av total kostnad per dag
             idx *= (1 + rhat);
             rows.add(proxyRow(keys.get(i), idx));
         }
@@ -508,7 +521,7 @@ public class IrisBondBackfill {
             s10 += d10; s5 += d5; pAcc += rng.nextGaussian() * 0.004;
             g10[i] = s10; g5[i] = s5; spread[i] = Math.max(pAcc, 0.05);
         }
-        double Doverlay = 8.0, Dcash = 3.0, conv = 60.0, feeDay = FEE_ANNUAL / 252.0;  // Dtot = 11
+        double Doverlay = 8.0, Dcash = 3.0, conv = 60.0, feeDay = SIM_COST_ANNUAL / 252.0;  // Dtot = 11
         TreeMap<LocalDate, Double> nav = new TreeMap<>(), g10M = new TreeMap<>(), g5M = new TreeMap<>(), spM = new TreeMap<>();
         double navv = 100.0;
         for (int i = 0; i < n; i++) {
@@ -546,6 +559,8 @@ public class IrisBondBackfill {
 
         Panel p = buildWeekly(nav, g10, g5, spread);
         System.out.printf("Metod: %s%n", KEY_RATE ? "KEY-RATE (5y + 10y statsranta)" : "ENFAKTOR (10y statsranta)");
+        System.out.printf("Kostnader: forvaltning %.3f%% + ovrigt %.3f%% = %.3f%%/ar pa simulerad serie (NAV-inbaddat: %.3f%%)%n",
+                MGMT_FEE_ANNUAL*100, OTHER_COSTS_ANNUAL*100, SIM_COST_ANNUAL*100, NAV_COST_ANNUAL*100);
         System.out.printf("Estimeringsfonster: %s -> %s (%d veckor)%n%n",
                 p.dates.get(0), p.dates.get(p.dates.size()-1), p.r.length);
 
@@ -553,7 +568,7 @@ public class IrisBondBackfill {
         Fit a = ols(p.r, designA(p), namesA(), HAC_LAGS);
         printFit(a);
         System.out.printf("Implicerad total-duration: %.2f ar  (mal ~%.1f)%n", impliedDuration(a), TARGET_DUR);
-        System.out.printf("Intercept: %+.6f/v ~ %+.2f %%/ar (fee+residualcarry)%n%n", a.beta[0], a.beta[0]*52*100);
+        System.out.printf("Intercept: %+.6f/v ~ %+.2f %%/ar (residualcarry/alfa, brutto - avgiften ar bortadderad)%n%n", a.beta[0], a.beta[0]*52*100);
 
         System.out.println("======= SPEC B (carry-forankrad - anvands for backfill) =======");
         Fit b = ols(p.r, designB(p), namesB(), HAC_LAGS);
