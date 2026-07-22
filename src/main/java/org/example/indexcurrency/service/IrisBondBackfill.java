@@ -45,10 +45,14 @@ public class IrisBondBackfill {
     // ---------------------------------------------------------------- //
     //  KONFIG
     // ---------------------------------------------------------------- //
-    static final String MODE       = "real";     // "demo" eller "real"
+    static final String MODE       = System.getProperty("mode", "real"); // "demo"/"real" (-Dmode=demo)
     static final double FEE_ANNUAL = 0.0030;     // ca-avgift (fangas av interceptet)
     static final double TARGET_DUR = 11.0;       // realiserad mod. duration ~11 (mandat 10-15y); sanity-check
     static final int    HAC_LAGS   = 4;          // Newey-West Bartlett-lags
+
+    // Dela upp rantan i 5y- och 10y-nyckelrater (summerar key-rate-durationer -> mindre attenuering)?
+    // Styr vid korning: -Dkeyrate=false ger enfaktormodellen (bara 10y). Default: pa.
+    static final boolean KEY_RATE  = Boolean.parseBoolean(System.getProperty("keyrate", "true"));
 
     // real-lage: faktorerna byggs fran Riksbank-serier (procent). Hamta med RiksbankFetcher.
     //   ranta (duration-overlay) = 10y statsobligation
@@ -115,42 +119,46 @@ public class IrisBondBackfill {
     // ================================================================ //
     static class Panel {
         List<LocalDate> dates = new ArrayList<>();
-        double[] r, dswap, dspr, carry, conv;
+        double[] r, dswap, dg5, dspr, carry, conv;   // dswap = d(10y), dg5 = d(5y)
     }
 
     static Panel buildWeekly(TreeMap<LocalDate, Double> nav,
-                             TreeMap<LocalDate, Double> swap,
+                             TreeMap<LocalDate, Double> g10,
+                             TreeMap<LocalDate, Double> g5,
                              TreeMap<LocalDate, Double> spread) {
         TreeMap<LocalDate, Double> navW = toWeekly(nav);
-        TreeMap<LocalDate, Double> swW  = toWeekly(swap);
+        TreeMap<LocalDate, Double> g10W = toWeekly(g10);
+        TreeMap<LocalDate, Double> g5W  = toWeekly(g5);
         TreeMap<LocalDate, Double> spW  = toWeekly(spread);
 
         // inner join pa gemensamma veckodatum
         List<LocalDate> keys = new ArrayList<>();
         for (LocalDate d : navW.keySet())
-            if (swW.containsKey(d) && spW.containsKey(d)) keys.add(d);
+            if (g10W.containsKey(d) && g5W.containsKey(d) && spW.containsKey(d)) keys.add(d);
         java.util.Collections.sort(keys);
 
         int n = keys.size();
-        double[] navv = new double[n], swv = new double[n], spv = new double[n];
+        double[] navv = new double[n], g10v = new double[n], g5v = new double[n], spv = new double[n];
         for (int i = 0; i < n; i++) {
             navv[i] = navW.get(keys.get(i));
-            swv[i]  = swW.get(keys.get(i));
+            g10v[i] = g10W.get(keys.get(i));
+            g5v[i]  = g5W.get(keys.get(i));
             spv[i]  = spW.get(keys.get(i));
         }
 
         // forsta raden tappas (diff/pct_change kraver t-1)
         Panel p = new Panel();
         int m = n - 1;
-        p.r = new double[m]; p.dswap = new double[m]; p.dspr = new double[m];
+        p.r = new double[m]; p.dswap = new double[m]; p.dg5 = new double[m]; p.dspr = new double[m];
         p.carry = new double[m]; p.conv = new double[m];
         for (int i = 1; i < n; i++) {
             int j = i - 1;
             p.dates.add(keys.get(i));
             p.r[j]     = navv[i] / navv[i - 1] - 1.0;
-            p.dswap[j] = (swv[i] - swv[i - 1]) / 100.0;
-            p.dspr[j]  = (spv[i] - spv[i - 1]) / 100.0;
-            p.carry[j] = (swv[i - 1] + spv[i - 1]) / 100.0 / 52.0;   // nivaterm, t-1
+            p.dswap[j] = (g10v[i] - g10v[i - 1]) / 100.0;
+            p.dg5[j]   = (g5v[i]  - g5v[i - 1])  / 100.0;
+            p.dspr[j]  = (spv[i]  - spv[i - 1])  / 100.0;
+            p.carry[j] = (g10v[i - 1] + spv[i - 1]) / 100.0 / 52.0;   // nivaterm, t-1
             p.conv[j]  = 0.5 * p.dswap[j] * p.dswap[j];
         }
         return p;
@@ -340,15 +348,47 @@ public class IrisBondBackfill {
     // ================================================================ //
     //  6. SPEC A / B  +  RAPPORT
     // ================================================================ //
-    static double[][] designA(Panel p) {          // const, dswap, dspr, conv
-        int m = p.r.length; double[][] X = new double[m][4];
-        for (int i = 0; i < m; i++) { X[i][0]=1; X[i][1]=p.dswap[i]; X[i][2]=p.dspr[i]; X[i][3]=p.conv[i]; }
+    // KEY_RATE=false: en 10y-rantefaktor (dswap). KEY_RATE=true: tva key-rates (dg5, dg10).
+    static String[] namesA() { return KEY_RATE ? new String[]{"const","dg5","dg10","dspr","conv"}
+                                               : new String[]{"const","dswap","dspr","conv"}; }
+    static String[] namesB() { return KEY_RATE ? new String[]{"const","dg5","dg10","dspr","carry","conv"}
+                                               : new String[]{"const","dswap","dspr","carry","conv"}; }
+
+    static double[][] designA(Panel p) {
+        int m = p.r.length;
+        double[][] X = new double[m][KEY_RATE ? 5 : 4];
+        for (int i = 0; i < m; i++) {
+            int k = 0; X[i][k++] = 1;
+            if (KEY_RATE) X[i][k++] = p.dg5[i];
+            X[i][k++] = p.dswap[i]; X[i][k++] = p.dspr[i]; X[i][k] = p.conv[i];
+        }
         return X;
     }
-    static double[][] designB(Panel p) {          // const, dswap, dspr, carry, conv
-        int m = p.r.length; double[][] X = new double[m][5];
-        for (int i = 0; i < m; i++) { X[i][0]=1; X[i][1]=p.dswap[i]; X[i][2]=p.dspr[i]; X[i][3]=p.carry[i]; X[i][4]=p.conv[i]; }
+    static double[][] designB(Panel p) {
+        int m = p.r.length;
+        double[][] X = new double[m][KEY_RATE ? 6 : 5];
+        for (int i = 0; i < m; i++) {
+            int k = 0; X[i][k++] = 1;
+            if (KEY_RATE) X[i][k++] = p.dg5[i];
+            X[i][k++] = p.dswap[i]; X[i][k++] = p.dspr[i]; X[i][k++] = p.carry[i]; X[i][k] = p.conv[i];
+        }
         return X;
+    }
+
+    /** Beta for en term via namn (0 om ej med), sa layouten kan variera med KEY_RATE. */
+    static double coefOf(Fit f, String name) {
+        for (int j = 0; j < f.names.length; j++) if (f.names[j].equals(name)) return f.beta[j];
+        return 0.0;
+    }
+    /** Total modifierad duration = -(summan av rante-key-rate-betorna). */
+    static double impliedDuration(Fit f) {
+        return KEY_RATE ? -(coefOf(f, "dg5") + coefOf(f, "dg10")) : -coefOf(f, "dswap");
+    }
+    /** En veckoavkastning fran betorna (interceptScale=1 vecka, 52/252 dag). */
+    static double rHat(Fit b, double dg5, double dg10, double dspr, double carry, double conv, double interceptScale) {
+        double rate = KEY_RATE ? coefOf(b, "dg5") * dg5 + coefOf(b, "dg10") * dg10 : coefOf(b, "dswap") * dg10;
+        return coefOf(b, "const") * interceptScale + rate
+                + coefOf(b, "dspr") * dspr + coefOf(b, "carry") * carry + coefOf(b, "conv") * conv;
     }
 
     static void printFit(Fit f) {
@@ -361,24 +401,25 @@ public class IrisBondBackfill {
     // ================================================================ //
     //  7. BACKFILL: applicera Spec B:s betor pa historiska faktorer
     // ================================================================ //
-    static void backfill(Fit b, TreeMap<LocalDate, Double> histSwap,
+    static void backfill(Fit b, TreeMap<LocalDate, Double> histG10,
+                         TreeMap<LocalDate, Double> histG5,
                          TreeMap<LocalDate, Double> histSpread) {
-        TreeMap<LocalDate, Double> sw = toWeekly(histSwap), sp = toWeekly(histSpread);
+        TreeMap<LocalDate, Double> sw = toWeekly(histG10), g5w = toWeekly(histG5), sp = toWeekly(histSpread);
         List<LocalDate> keys = new ArrayList<>();
-        for (LocalDate d : sw.keySet()) if (sp.containsKey(d)) keys.add(d);
+        for (LocalDate d : sw.keySet()) if (g5w.containsKey(d) && sp.containsKey(d)) keys.add(d);
         java.util.Collections.sort(keys);
 
-        double[] c = b.beta;   // const, dswap, dspr, carry, conv
         double idx = 100.0;
         List<String> pretty = new ArrayList<>();
         List<String> csv = new ArrayList<>();
         csv.add("date,index");
         for (int i = 1; i < keys.size(); i++) {
             double s0 = sw.get(keys.get(i-1)), s1 = sw.get(keys.get(i));
+            double f0 = g5w.get(keys.get(i-1)), f1 = g5w.get(keys.get(i));
             double p0 = sp.get(keys.get(i-1)), p1 = sp.get(keys.get(i));
-            double dswap = (s1 - s0) / 100.0, dspr = (p1 - p0) / 100.0;
-            double carry = (s0 + p0) / 100.0 / 52.0, conv = 0.5 * dswap * dswap;
-            double rhat = c[0] + c[1]*dswap + c[2]*dspr + c[3]*carry + c[4]*conv;
+            double dg10 = (s1 - s0) / 100.0, dg5 = (f1 - f0) / 100.0, dspr = (p1 - p0) / 100.0;
+            double carry = (s0 + p0) / 100.0 / 52.0, conv = 0.5 * dg10 * dg10;
+            double rhat = rHat(b, dg5, dg10, dspr, carry, conv, 1.0);
             idx *= (1 + rhat);
             pretty.add(String.format("%s  r_hat=%+.4f  index=%.4f", keys.get(i), rhat, idx));
             csv.add(keys.get(i) + "," + String.format(java.util.Locale.US, "%.6f", idx));
@@ -402,16 +443,14 @@ public class IrisBondBackfill {
     // Spec B ar skattad pa VECKOdata, men duration/spread-betorna ar frekvensoberoende (r = -D*dy) och
     // carryn skalar med /252 istallet for /52. Sa vi bygger en DAGLIG r_hat och kedjar till ett index -
     // en daglig serie plockar appens dagliga metod upp utan att veckoglapp blaser upp volatiliteten.
-    static void writeAppProxy(Fit b, TreeMap<LocalDate, Double> swap, TreeMap<LocalDate, Double> spread) {
+    static void writeAppProxy(Fit b, TreeMap<LocalDate, Double> g10,
+                              TreeMap<LocalDate, Double> g5, TreeMap<LocalDate, Double> spread) {
         List<LocalDate> keys = new ArrayList<>();
-        for (LocalDate d : swap.keySet()) if (spread.containsKey(d)) keys.add(d);
+        for (LocalDate d : g10.keySet()) if (g5.containsKey(d) && spread.containsKey(d)) keys.add(d);
         java.util.Collections.sort(keys);
         if (keys.size() < 2) { System.out.println("Proxy: for lite faktordata"); return; }
 
-        double[] c = b.beta;                  // const, dswap, dspr, carry, conv (veckoskattade)
-        double b0d = c[0] * 52.0 / 252.0;     // veckointercept -> daglig
         double idx = 100.0;
-
         List<String> rows = new ArrayList<>();
         rows.add("# symbol=" + PROXY_SYMBOL);
         rows.add("# currency=SEK");
@@ -422,11 +461,12 @@ public class IrisBondBackfill {
         rows.add("date,open,high,low,close,adjclose,volume,dividend");
         rows.add(proxyRow(keys.get(0), idx));
         for (int i = 1; i < keys.size(); i++) {
-            double s0 = swap.get(keys.get(i-1)), s1 = swap.get(keys.get(i));
+            double s0 = g10.get(keys.get(i-1)), s1 = g10.get(keys.get(i));
+            double f0 = g5.get(keys.get(i-1)), f1 = g5.get(keys.get(i));
             double p0 = spread.get(keys.get(i-1)), p1 = spread.get(keys.get(i));
-            double dswap = (s1 - s0) / 100.0, dspr = (p1 - p0) / 100.0;
-            double carry = (s0 + p0) / 100.0 / 252.0, conv = 0.5 * dswap * dswap;
-            double rhat = b0d + c[1]*dswap + c[2]*dspr + c[3]*carry + c[4]*conv;
+            double dg10 = (s1 - s0) / 100.0, dg5 = (f1 - f0) / 100.0, dspr = (p1 - p0) / 100.0;
+            double carry = (s0 + p0) / 100.0 / 252.0, conv = 0.5 * dg10 * dg10;
+            double rhat = rHat(b, dg5, dg10, dspr, carry, conv, 52.0 / 252.0);   // daglig: skala interceptet
             idx *= (1 + rhat);
             rows.add(proxyRow(keys.get(i), idx));
         }
@@ -458,30 +498,34 @@ public class IrisBondBackfill {
             d = d.plusDays(1);
         }
         int n = idx.size();
-        double[] swap = new double[n], spread = new double[n];
-        double sAcc = 1.0, pAcc = 0.35;
+        // Tvafaktor-"sanning": 5y ror sig korrelerat men inte identiskt med 10y. Da underskattar
+        // enfaktormodellen totalen (attenuering) medan key-rate-modellen aterskapar Doverlay+Dcash.
+        double[] g10 = new double[n], g5 = new double[n], spread = new double[n];
+        double s10 = 1.0, s5 = 0.6, pAcc = 0.35;
         for (int i = 0; i < n; i++) {
-            sAcc += rng.nextGaussian() * 0.015;
-            pAcc += rng.nextGaussian() * 0.004;
-            swap[i] = sAcc;
-            spread[i] = Math.max(pAcc, 0.05);
+            double d10 = rng.nextGaussian() * 0.015;
+            double d5  = 0.5 * d10 + rng.nextGaussian() * 0.010;   // 5y: delvis delad, delvis egen rorelse
+            s10 += d10; s5 += d5; pAcc += rng.nextGaussian() * 0.004;
+            g10[i] = s10; g5[i] = s5; spread[i] = Math.max(pAcc, 0.05);
         }
-        double Dtot = 11.0, Dcash = 2.5, conv = 60.0, feeDay = FEE_ANNUAL / 252.0;
-        TreeMap<LocalDate, Double> nav = new TreeMap<>(), swM = new TreeMap<>(), spM = new TreeMap<>();
+        double Doverlay = 8.0, Dcash = 3.0, conv = 60.0, feeDay = FEE_ANNUAL / 252.0;  // Dtot = 11
+        TreeMap<LocalDate, Double> nav = new TreeMap<>(), g10M = new TreeMap<>(), g5M = new TreeMap<>(), spM = new TreeMap<>();
         double navv = 100.0;
         for (int i = 0; i < n; i++) {
-            double dswap = i == 0 ? 0 : (swap[i]-swap[i-1]) / 100.0;
-            double dspr  = i == 0 ? 0 : (spread[i]-spread[i-1]) / 100.0;
-            double carry = (i == 0 ? (swap[0]+spread[0]) : (swap[i-1]+spread[i-1])) / 100.0 / 252.0;
-            double r = -Dtot*dswap - Dcash*dspr + carry + 0.5*conv*dswap*dswap
+            double dg10 = i == 0 ? 0 : (g10[i]-g10[i-1]) / 100.0;
+            double dg5  = i == 0 ? 0 : (g5[i]-g5[i-1]) / 100.0;
+            double dspr = i == 0 ? 0 : (spread[i]-spread[i-1]) / 100.0;
+            double carry = (i == 0 ? (g10[0]+spread[0]) : (g10[i-1]+spread[i-1])) / 100.0 / 252.0;
+            double r = -Doverlay*dg10 - Dcash*dg5 - Dcash*dspr + carry + 0.5*conv*dg10*dg10
                     - feeDay + rng.nextGaussian() * 0.0002;
             navv *= (1 + r);
             nav.put(idx.get(i), navv);
-            swM.put(idx.get(i), swap[i]);
+            g10M.put(idx.get(i), g10[i]);
+            g5M.put(idx.get(i), g5[i]);
             spM.put(idx.get(i), spread[i]);
         }
         @SuppressWarnings("unchecked")
-        TreeMap<LocalDate, Double>[] out = new TreeMap[]{nav, swM, spM};
+        TreeMap<LocalDate, Double>[] out = new TreeMap[]{nav, g10M, g5M, spM};
         return out;
     }
 
@@ -489,37 +533,40 @@ public class IrisBondBackfill {
     //  MAIN
     // ================================================================ //
     public static void main(String[] args) throws IOException {
-        TreeMap<LocalDate, Double> nav, swap, spread;
+        TreeMap<LocalDate, Double> nav, g10, g5, spread;
         if (MODE.equals("demo")) {
             TreeMap<LocalDate, Double>[] dm = makeDemo();
-            nav = dm[0]; swap = dm[1]; spread = dm[2];
+            nav = dm[0]; g10 = dm[1]; g5 = dm[2]; spread = dm[3];
         } else {
             nav = readCsv(PATH_NAV);
-            TreeMap<LocalDate, Double> g10 = readCsv(PATH_G10);
-            TreeMap<LocalDate, Double> g5  = readCsv(PATH_G5);
-            TreeMap<LocalDate, Double> b5  = readCsv(PATH_B5);
-            swap   = g10;              // rantefaktor (duration-overlay) = 10y statsobligation
-            spread = minus(b5, g5);    // covered-spread = 5y bostad - 5y stat
+            g10 = readCsv(PATH_G10);
+            g5  = readCsv(PATH_G5);
+            spread = minus(readCsv(PATH_B5), g5);    // covered-spread = 5y bostad - 5y stat
         }
 
-        Panel p = buildWeekly(nav, swap, spread);
+        Panel p = buildWeekly(nav, g10, g5, spread);
+        System.out.printf("Metod: %s%n", KEY_RATE ? "KEY-RATE (5y + 10y statsranta)" : "ENFAKTOR (10y statsranta)");
         System.out.printf("Estimeringsfonster: %s -> %s (%d veckor)%n%n",
                 p.dates.get(0), p.dates.get(p.dates.size()-1), p.r.length);
 
         System.out.println("================ SPEC A (fri, med intercept) ================");
-        Fit a = ols(p.r, designA(p), new String[]{"const","dswap","dspr","conv"}, HAC_LAGS);
+        Fit a = ols(p.r, designA(p), namesA(), HAC_LAGS);
         printFit(a);
-        System.out.printf("Implicerad total-duration (-b_dswap): %.2f ar  (mal ~%.1f)%n", -a.beta[1], TARGET_DUR);
+        System.out.printf("Implicerad total-duration: %.2f ar  (mal ~%.1f)%n", impliedDuration(a), TARGET_DUR);
         System.out.printf("Intercept: %+.6f/v ~ %+.2f %%/ar (fee+residualcarry)%n%n", a.beta[0], a.beta[0]*52*100);
 
         System.out.println("======= SPEC B (carry-forankrad - anvands for backfill) =======");
-        Fit b = ols(p.r, designB(p), new String[]{"const","dswap","dspr","carry","conv"}, HAC_LAGS);
+        Fit b = ols(p.r, designB(p), namesB(), HAC_LAGS);
         printFit(b);
-        System.out.printf("carry-koeff: %.2f  (bor ligga nara 1.0)%n", b.beta[3]);
-        System.out.printf("Total-duration: %.2f ar   Kassabenets duration (-b_dspr): %.2f ar%n", -b.beta[1], -b.beta[2]);
+        System.out.printf("carry-koeff: %.2f  (bor ligga nara 1.0)%n", coefOf(b, "carry"));
+        System.out.printf("Total-duration: %.2f ar   Kassabenets duration (-b_dspr): %.2f ar%n",
+                impliedDuration(b), -coefOf(b, "dspr"));
+        if (KEY_RATE)
+            System.out.printf("  varav 5y-nyckelrate: %.2f ar,  10y-nyckelrate: %.2f ar%n", -coefOf(b, "dg5"), -coefOf(b, "dg10"));
         System.out.printf("Ljung-Box(%d) p: %.3f  (>0.05 = ingen kvarvarande autokorr.)%n", HAC_LAGS, ljungBoxP(b.resid, HAC_LAGS));
+        System.out.printf("Korrelation fond vs modell (in-sample) = sqrt(R2) = %.4f%n", Math.sqrt(Math.max(b.r2, 0)));
 
-        backfill(b, swap, spread);
-        if (MODE.equals("real")) writeAppProxy(b, swap, spread);
+        backfill(b, g10, g5, spread);
+        if (MODE.equals("real")) writeAppProxy(b, g10, g5, spread);
     }
 }
